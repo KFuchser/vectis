@@ -1,0 +1,39 @@
+name: Daily Data Factory Pipeline
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Runs at 6:00 AM UTC every day
+  workflow_dispatch:      # Adds a "Run Now" button for manual testing
+
+jobs:
+  ingest-and-classify:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Ingestion (Austin & Fort Worth)
+        env:
+          # We map the GitHub Secrets to the Environment Variables your script expects
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+          # Note: We aren't using Google AI in this run to avoid rate limits, 
+          # but if you add it back later, add GOOGLE_API_KEY here.
+        run: python ingest_velocity_50.py
+
+      - name: Run Keyword Classifier (Refinement)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: python keyword_classifier.py
