@@ -1,0 +1,9 @@
+streamlit
+pandas
+supabase
+sodapy
+requests
+python-dotenv
+altair
+pydantic
+google-generativeai
