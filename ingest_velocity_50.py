@@ -26,52 +26,61 @@ def ingest_austin():
     """
     TARGET: Austin (Benchmark)
     Platform: Socrata (sodapy)
+    Fixes: 'applieddate' typo and string valuation parsing.
     """
     print(">> Ingesting Target: Austin (Socrata)...")
     
-    # FIX: Add 'timeout=60' (Default was 10, which caused the crash)
     client = Socrata("data.austintexas.gov", SOCRATA_TOKEN, timeout=60)
     
-    try:
-        results = client.get(
-            "3syk-w9eu",
-            where="status_current in ('Issued', 'Final') AND issue_date > '2025-10-01'",
-            limit=2000,
-            order="issue_date DESC"
-        )
-        
-        if not results:
-            print("!! ALERT: No records returned from Austin API.")
-            return [] 
+    # Note: increased limit to ensure we get enough valid data
+    results = client.get(
+        "3syk-w9eu",
+        where="status_current in ('Issued', 'Final') AND issue_date > '2025-10-01'",
+        limit=3000, 
+        order="issue_date DESC"
+    )
+    
+    if not results:
+        print("!! ALERT: No records returned from Austin API.")
+        return [] 
 
-        print(f">> Raw Austin Records: {len(results)}")
+    print(f">> Raw Austin Records: {len(results)}")
 
-        cleaned_records = []
-        
-        for row in results:
-            try:
-                val_raw = row.get("total_job_valuation") or row.get("valuation")
-                val_float = float(val_raw) if val_raw else 0.0
+    cleaned_records = []
+    
+    for row in results:
+        try:
+            # FIX 1: Robust Valuation Parsing (Handle "$,")
+            val_raw = row.get("total_job_valuation") or row.get("valuation")
+            if isinstance(val_raw, str):
+                # Remove currency symbols causing float() to crash
+                val_raw = val_raw.replace('$', '').replace(',', '')
+            
+            val_float = float(val_raw) if val_raw else 0.0
 
-                permit = PermitRecord(
-                    city="Austin",
-                    permit_id=row.get("permit_number"), 
-                    applied_date=row.get("applied_date"), 
-                    issued_date=row.get("issue_date"),
-                    description=row.get("work_description", row.get("permit_type_desc", "No Description")),
-                    valuation=val_float,
-                    status=row.get("status_current")
-                )
-                cleaned_records.append(permit.model_dump(mode='json'))
-            except Exception:
-                continue
+            # FIX 2: Correct API Field Names
+            # API uses 'applieddate' (no underscore) and 'issue_date' (underscore)
+            applied_val = row.get("applieddate") 
+            
+            permit = PermitRecord(
+                city="Austin",
+                permit_id=row.get("permit_number"), 
                 
-        print(f">> Scored Austin Records: {len(cleaned_records)}")
-        return cleaned_records
-        
-    except Exception as e:
-        print(f"!! Austin Ingestion Failed: {e}")
-        return []
+                # Map the correct API field to our Schema field
+                applied_date=applied_val, 
+                issued_date=row.get("issue_date"),
+                
+                description=row.get("work_description") or row.get("permit_type_desc") or "No Description",
+                valuation=val_float,
+                status=row.get("status_current")
+            )
+            cleaned_records.append(permit.model_dump(mode='json'))
+        except Exception as e:
+            # Optional: print(f"Skipped row: {e}")
+            continue
+            
+    print(f">> Scored Austin Records: {len(cleaned_records)}")
+    return cleaned_records
 
 def ingest_san_antonio():
     """
