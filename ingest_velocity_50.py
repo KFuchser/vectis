@@ -1,6 +1,7 @@
 import os
 import requests
 import io
+import time
 import pandas as pd
 from sodapy import Socrata
 from supabase import create_client, Client
@@ -20,26 +21,99 @@ SOCRATA_TOKEN = os.getenv("SOCRATA_APP_TOKEN")
 # Initialize Supabase
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# --- INGESTION FUNCTIONS ---
+# --- CORE LOGIC: DAILY DELTA (ARMORED) ---
+def process_daily_delta(new_df, supabase_client):
+    """
+    Implements Protocol 'Total Market' Snapshot Logic.
+    Compares incoming Socrata data (new_df) vs Supabase (existing).
+    Logs status changes to 'permit_history_log'.
+    Includes CHUNKING to prevent HTTP 400 Errors.
+    """
+    if new_df.empty:
+        return new_df
+        
+    print(f">> 🕵️ Running Daily Delta on {len(new_df)} records...")
+
+    # 1. Get Unique List of Permit IDs to check
+    incoming_ids = list(set(new_df['permit_id'].tolist()))
+
+    # 2. Fetch CURRENT state with CHUNKING (Fixes HTTP 400 Error)
+    existing_map = {}
+    BATCH_SIZE = 200  # Safe limit for URL length
+    
+    try:
+        for i in range(0, len(incoming_ids), BATCH_SIZE):
+            chunk = incoming_ids[i : i + BATCH_SIZE]
+            
+            response = supabase_client.table('permits')\
+                .select('permit_id, status, city')\
+                .in_('permit_id', chunk)\
+                .execute()
+            
+            # Update our lookup map with the results from this chunk
+            for r in response.data:
+                existing_map[r['permit_id']] = r.get('status')
+                
+    except Exception as e:
+        print(f"!! Error fetching existing records: {e}")
+        return new_df
+
+    # 3. Detect Changes
+    history_log = []
+    
+    for _, row in new_df.iterrows():
+        pid = row['permit_id']
+        new_status = row.get('status')
+        old_status = existing_map.get(pid)
+
+        # CASE A: Status Changed (The Signal)
+        if old_status and new_status and new_status != old_status:
+            print(f"   ⚡ Delta Detected [{pid}]: {old_status} -> {new_status}")
+            history_log.append({
+                "permit_id": pid,
+                "city": row['city'],
+                "previous_status": old_status,
+                "new_status": new_status,
+                "change_date": pd.Timestamp.now().date().isoformat()
+            })
+
+    # 4. Write to History Log
+    if history_log:
+        print(f">> 📝 Logging {len(history_log)} status changes to Ledger...")
+        try:
+            supabase_client.table('permit_history_log').insert(history_log).execute()
+        except Exception as e:
+            print(f"!! Error writing history log: {e}")
+    else:
+        print(">> No status changes detected in this batch.")
+
+    return new_df 
+
+# --- INGESTION FUNCTIONS (ARMORED) ---
 
 def ingest_austin():
     """
     TARGET: Austin (Benchmark)
-    Platform: Socrata (sodapy)
-    Fixes: 'applieddate' typo and string valuation parsing.
+    Includes RETRY LOGIC for timeouts.
     """
     print(">> Ingesting Target: Austin (Socrata)...")
     
-    client = Socrata("data.austintexas.gov", SOCRATA_TOKEN, timeout=60)
-    
-    # Note: increased limit to ensure we get enough valid data
-    results = client.get(
-        "3syk-w9eu",
-        where="status_current in ('Issued', 'Final') AND issue_date > '2025-10-01'",
-        limit=3000, 
-        order="issue_date DESC"
-    )
-    
+    # Retry Loop
+    for attempt in range(3):
+        try:
+            client = Socrata("data.austintexas.gov", SOCRATA_TOKEN, timeout=120) # Bumped to 120s
+            results = client.get(
+                "3syk-w9eu",
+                where="status_current in ('Issued', 'Final') AND issue_date > '2025-10-01'",
+                limit=3000, 
+                order="issue_date DESC"
+            )
+            break # Success
+        except Exception as e:
+            print(f"   ⚠️ Attempt {attempt+1} failed: {e}")
+            time.sleep(5)
+            if attempt == 2: return [] # Give up
+
     if not results:
         print("!! ALERT: No records returned from Austin API.")
         return [] 
@@ -50,87 +124,74 @@ def ingest_austin():
     
     for row in results:
         try:
-            # FIX 1: Robust Valuation Parsing (Handle "$,")
+            # FIX: Valuation Parsing
             val_raw = row.get("total_job_valuation") or row.get("valuation")
             if isinstance(val_raw, str):
-                # Remove currency symbols causing float() to crash
                 val_raw = val_raw.replace('$', '').replace(',', '')
-            
             val_float = float(val_raw) if val_raw else 0.0
 
-            # FIX 2: Correct API Field Names
-            # API uses 'applieddate' (no underscore) and 'issue_date' (underscore)
-            applied_val = row.get("applieddate") 
+            # FIX: Time Travel
+            applied_raw = row.get("applieddate")
+            issued_raw = row.get("issue_date")
+            applied_dt = pd.to_datetime(applied_raw).date() if applied_raw else None
+            issued_dt = pd.to_datetime(issued_raw).date() if issued_raw else None
             
+            if applied_dt and issued_dt and issued_dt < applied_dt:
+                applied_dt, issued_dt = issued_dt, applied_dt
+
             permit = PermitRecord(
                 city="Austin",
                 permit_id=row.get("permit_number"), 
-                
-                # Map the correct API field to our Schema field
-                applied_date=applied_val, 
-                issued_date=row.get("issue_date"),
-                
+                applied_date=applied_dt, 
+                issued_date=issued_dt,
                 description=row.get("work_description") or row.get("permit_type_desc") or "No Description",
                 valuation=val_float,
                 status=row.get("status_current")
             )
             cleaned_records.append(permit.model_dump(mode='json'))
         except Exception as e:
-            # Optional: print(f"Skipped row: {e}")
             continue
             
     print(f">> Scored Austin Records: {len(cleaned_records)}")
     return cleaned_records
 
 def ingest_san_antonio():
-    """
-    TARGET: San Antonio
-    Platform: CKAN (Raw CSV)
-    Schema: Explicitly mapped based on Data Dictionary (Source 1).
-    """
-    print("\n>> Ingesting Target: San Antonio (Direct CSV + Dictionary Map)...")
+    print("\n>> Ingesting Target: San Antonio (Direct CSV)...")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
 
-    # 1. Get Dynamic URL
-    meta_endpoint = "https://data.sanantonio.gov/api/3/action/resource_show"
-    params = {"id": "c21106f9-3ef5-4f3a-8604-f992b4db7512"}
-    
     try:
+        # Retry logic handled by requests implicitly or we can wrap, 
+        # but usually getting the URL is the hard part.
+        meta_endpoint = "https://data.sanantonio.gov/api/3/action/resource_show"
+        params = {"id": "c21106f9-3ef5-4f3a-8604-f992b4db7512"}
+        
         meta_resp = requests.get(meta_endpoint, params=params, headers=headers, timeout=30)
         meta_resp.raise_for_status()
         csv_url = meta_resp.json()['result']['url']
         
-        # 2. Download Content
-        file_resp = requests.get(csv_url, headers=headers, timeout=60)
+        # Download with increased timeout
+        file_resp = requests.get(csv_url, headers=headers, timeout=120)
         file_resp.raise_for_status()
         
-        # 3. Load CSV
         df = pd.read_csv(io.BytesIO(file_resp.content))
-        
-        # 4. Normalize Headers (Standardize based on your Data Dictionary image)
-        # "DATE ISSUED" -> "date_issued"
-        # "DATE SUBMITTED" -> "date_submitted"
-        # "PERMIT #" -> "permit_#"
         df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
         
-        # 5. Define The "Gold Standard" Mapping
         col_map = {
-            'issue': 'date_issued',      # From Data Dictionary: "DATE ISSUED"
-            'applied': 'date_submitted', # From Data Dictionary: "DATE SUBMITTED"
-            'id': 'permit_#',            # From Data Dictionary: "PERMIT #"
-            'desc': 'work_type',         # From Data Dictionary: "WORK TYPE"
-            'val': 'declared_valuation'  # From Data Dictionary: "DECLARED VALUATION"
+            'issue': 'date_issued',
+            'applied': 'date_submitted',
+            'id': 'permit_#',
+            'desc': 'work_type',
+            'val': 'declared_valuation'
         }
 
-        # 6. Parse Dates
-        # Handle the specific "date_submitted" column we now know exists
+        # Parse Dates
         df[col_map['issue']] = pd.to_datetime(df[col_map['issue']], errors='coerce')
         df[col_map['applied']] = pd.to_datetime(df[col_map['applied']], errors='coerce')
         
-        # 7. Filter: Recent & Issued
+        # Filter
         cutoff_date = pd.Timestamp('2025-10-01')
         mask = (df[col_map['issue']] >= cutoff_date)
         df = df[mask].copy()
@@ -138,32 +199,19 @@ def ingest_san_antonio():
         print(f">> Raw San Antonio Records (Post-Filter): {len(df)}")
 
         cleaned_records = []
-        
         for _, row in df.iterrows():
             try:
-                # --- Dirty Date Logic ---
                 issued_dt = row[col_map['issue']]
                 applied_dt = row[col_map['applied']]
-
                 if pd.isnull(issued_dt): continue
                 
-                # Swap logic
                 if pd.notnull(applied_dt) and (issued_dt < applied_dt):
                     issued_dt, applied_dt = applied_dt, issued_dt
 
-                # --- Valuation ---
                 val_raw = row.get(col_map['val'], 0)
                 val_float = float(val_raw) if pd.notnull(val_raw) else 0.0
-
-                # --- Description ---
-                # Combine "PERMIT TYPE" + "WORK TYPE" + "PROJECT NAME" for rich context
-                p_type = row.get('permit_type', '')
-                w_type = row.get('work_type', '')
-                p_name = row.get('project_name', '')
-                desc = f"{p_type} - {w_type} ({p_name})".strip()
-
-                # --- ID ---
-                # Handle the '#' in 'permit_#'
+                
+                desc = f"{row.get('permit_type','')} - {row.get('work_type','')} ({row.get('project_name','')})".strip()
                 id_val = row.get(col_map['id']) or row.get('permit_no')
 
                 permit = PermitRecord(
@@ -176,159 +224,106 @@ def ingest_san_antonio():
                     status="Issued"
                 )
                 cleaned_records.append(permit.model_dump(mode='json'))
-
             except Exception:
                 continue
-                
+        
         print(f">> Scored San Antonio Records: {len(cleaned_records)}")
         return cleaned_records
-
     except Exception as e:
         print(f"!! San Antonio Ingestion Failed: {e}")
-        # Debug helper: if it fails, show us the columns again just in case
         return []
 
 def ingest_fort_worth():
-    """
-    TARGET: Fort Worth
-    Platform: ArcGIS REST API (MapIT Server)
-    Layer: 0 (Permits)
-    """
     print("\n>> Ingesting Target: Fort Worth (MapIT Server)...")
-    
     base_url = "https://mapit.fortworthtexas.gov/ags/rest/services/CIVIC/Permits/MapServer/0/query"
-    
-    # 1. Query: Fetch recent records
-    # We sort by Status_Date because we know that field exists now.
     params = {
-        "where": "1=1",
-        "outFields": "*",
-        "f": "json",
-        "resultRecordCount": 2000,
-        "orderByFields": "Status_Date DESC" 
+        "where": "1=1", "outFields": "*", "f": "json",
+        "resultRecordCount": 2000, "orderByFields": "Status_Date DESC" 
     }
     
-    try:
-        response = requests.get(base_url, params=params, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-        
-        if 'error' in data:
-            print(f"!! ArcGIS Error: {data['error']}")
-            return []
-
-        features = data.get('features', [])
-        if not features:
-            print("!! ALERT: No records found.")
-            return []
-
-        print(f">> Raw FW Records: {len(features)}")
-
-        cleaned_records = []
-        
-        for feature in features:
-            attr = feature.get('attributes', {})
-            try:
-                # --- MAPPING: The Rosetta Stone ---
-                
-                # 1. Status Check (Using 'Current_Status')
-                status = str(attr.get("Current_Status", "")).title()
-                if status not in ['Issued', 'Finaled', 'Complete', 'Active']:
-                    continue # Skip unissued apps
-                
-                # 2. Date Parsing (ArcGIS MS Timestamps)
-                # 'Status_Date' -> Issued Date
-                # 'File_Date'   -> Applied Date
-                
-                issued_dt = None
-                if attr.get("Status_Date"):
-                    issued_dt = pd.to_datetime(attr.get("Status_Date"), unit='ms').date()
-                
-                applied_dt = None
-                if attr.get("File_Date"):
-                    applied_dt = pd.to_datetime(attr.get("File_Date"), unit='ms').date()
-
-                # Filter: Keep only recent (Last 60 days)
-                if issued_dt and issued_dt < pd.to_datetime('2025-10-01').date():
-                    continue
-
-                # 3. Valuation ('JobValue')
-                val_raw = attr.get("JobValue", 0.0)
-                
-                # 4. Create Record
-                permit = PermitRecord(
-                    city="Fort Worth",
-                    permit_id=str(attr.get("Permit_Num") or attr.get("Permit_No") or "UNK-" + str(attr.get("OBJECTID"))),
-                    
-                    applied_date=applied_dt,
-                    issued_date=issued_dt,
-                    
-                    description=attr.get("B1_WORK_DESC") or "No Description",
-                    valuation=float(val_raw) if val_raw else 0.0,
-                    status=status
-                )
-                
-                cleaned_records.append(permit.model_dump(mode='json'))
-
-            except Exception:
-                continue
-                
-        print(f">> Scored FW Records: {len(cleaned_records)}")
-        return cleaned_records
-
-    except Exception as e:
-        print(f"!! Fort Worth Ingestion Failed: {e}")
+    # Retry Loop
+    data = {}
+    for attempt in range(3):
+        try:
+            response = requests.get(base_url, params=params, timeout=120)
+            response.raise_for_status()
+            data = response.json()
+            break
+        except Exception as e:
+            print(f"   ⚠️ FW Attempt {attempt+1} failed: {e}")
+            time.sleep(5)
+    
+    features = data.get('features', [])
+    if not features:
         return []
 
-# --- MAIN CONTROLLER ---
+    print(f">> Raw FW Records: {len(features)}")
+    cleaned_records = []
+    for feature in features:
+        attr = feature.get('attributes', {})
+        try:
+            status = str(attr.get("Current_Status", "")).title()
+            if status not in ['Issued', 'Finaled', 'Complete', 'Active']: continue 
+            
+            issued_dt = None
+            if attr.get("Status_Date"):
+                issued_dt = pd.to_datetime(attr.get("Status_Date"), unit='ms').date()
+            
+            applied_dt = None
+            if attr.get("File_Date"):
+                applied_dt = pd.to_datetime(attr.get("File_Date"), unit='ms').date()
 
+            if issued_dt and issued_dt < pd.to_datetime('2025-10-01').date(): continue
+            if issued_dt and applied_dt and issued_dt < applied_dt:
+                issued_dt, applied_dt = applied_dt, issued_dt
+
+            permit = PermitRecord(
+                city="Fort Worth",
+                permit_id=str(attr.get("Permit_Num") or attr.get("Permit_No") or "UNK-" + str(attr.get("OBJECTID"))),
+                applied_date=applied_dt, issued_date=issued_dt,
+                description=attr.get("B1_WORK_DESC") or "No Description",
+                valuation=float(attr.get("JobValue", 0.0) or 0.0),
+                status=status
+            )
+            cleaned_records.append(permit.model_dump(mode='json'))
+        except Exception:
+            continue
+    print(f">> Scored FW Records: {len(cleaned_records)}")
+    return cleaned_records
+
+# --- MAIN CONTROLLER ---
 def run_pipeline():
     try:
-        # --- HELPER: Deduplicator ---
         def remove_duplicates(records):
-            """
-            Keeps only the FIRST occurrence of a permit_id.
-            Since we sort by Date DESC in the query, this keeps the newest version.
-            """
             seen = set()
-            unique_records = []
+            unique = []
             for r in records:
-                pid = r['permit_id']
-                if pid not in seen:
-                    unique_records.append(r)
-                    seen.add(pid)
-            return unique_records
+                if r['permit_id'] not in seen:
+                    unique.append(r)
+                    seen.add(r['permit_id'])
+            return unique
 
-        # --- 1. AUSTIN ---
-        austin_data = ingest_austin()
-        if austin_data:
-            clean_austin = remove_duplicates(austin_data)
-            supabase.table('permits').upsert(
-                clean_austin, on_conflict='permit_id, city'
-            ).execute()
-            print(f">> Austin Data Sync Complete. ({len(clean_austin)} unique records)")
-        
-        # --- 2. FORT WORTH ---
-        fw_data = ingest_fort_worth()
-        if fw_data:
-            clean_fw = remove_duplicates(fw_data)
-            supabase.table('permits').upsert(
-                clean_fw, on_conflict='permit_id, city'
-            ).execute()
-            print(f">> Fort Worth Data Sync Complete. ({len(clean_fw)} unique records)")
+        def execute_city_sync(city_name, fetch_func):
+            print(f"\n--- SYNCING {city_name.upper()} ---")
+            raw = fetch_func()
+            if not raw: return
+            
+            clean = remove_duplicates(raw)
+            df_delta = pd.DataFrame(clean)
+            
+            # RUN DELTA LOGIC (With Chunking Fix)
+            process_daily_delta(df_delta, supabase)
+            
+            # UPSERT
+            supabase.table('permits').upsert(clean, on_conflict='permit_id, city').execute()
+            print(f">> {city_name} Sync Complete. ({len(clean)} unique records)")
 
-        # --- 3. SAN ANTONIO (NEW) ---
-        sa_data = ingest_san_antonio()
-        if sa_data:
-            clean_sa = remove_duplicates(sa_data)
-            supabase.table('permits').upsert(
-                clean_sa, on_conflict='permit_id, city'
-            ).execute()
-            print(f">> San Antonio Data Sync Complete. ({len(clean_sa)} unique records)")
+        execute_city_sync("Austin", ingest_austin)
+        execute_city_sync("Fort Worth", ingest_fort_worth)
+        execute_city_sync("San Antonio", ingest_san_antonio)
             
     except Exception as e:
         print(f"!! CRITICAL PIPELINE FAILURE: {e}")
 
-# --- IGNITION ---
 if __name__ == "__main__":
     run_pipeline()
