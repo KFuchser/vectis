@@ -64,19 +64,18 @@ supabase: Client = create_client(url, key)
 
 @st.cache_data(ttl=600)
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def load_data():
     """
-    Fetches data from 'vectis_permits' (The correct table).
-    Includes Column Mapping to fix 'issue_date' vs 'issued_date' conflicts.
+    Fetches data from 'permits' (The ACTUAL table).
     """
-    # 1. Pagination Loop
     all_records = []
     batch_size = 1000
     offset = 0
     
     while True:
-        # FIX 1: Point to the new table 'vectis_permits'
-        response = supabase.table('vectis_permits').select("*").range(offset, offset + batch_size - 1).execute()
+        # FIX: Changed 'vectis_permits' back to 'permits'
+        response = supabase.table('permits').select("*").range(offset, offset + batch_size - 1).execute()
         records = response.data
         all_records.extend(records)
         if len(records) < batch_size:
@@ -88,34 +87,28 @@ def load_data():
     if df.empty:
         return df
 
-    # FIX 2: Standardize Column Names (Safety Map)
-    # Your logs show the DB uses 'issue_date' but code expects 'issued_date'
+    # SAFETY MAP: Handles "issue_date" (DB) vs "issued_date" (Code) mismatch
     column_map = {
-        'issue_date': 'issued_date',  # Map DB name to Code name
+        'issue_date': 'issued_date',
         'work_description': 'description',
         'est_value': 'valuation',
         'project_cost': 'valuation'
     }
     df = df.rename(columns=column_map)
 
-    # 3. Type Conversion (Now safe)
-    # Handle missing columns gracefully
+    # Clean up dates and numbers
     if 'issued_date' not in df.columns:
         df['issued_date'] = pd.NaT
     if 'applied_date' not in df.columns:
-        df['applied_date'] = pd.NaT # Handle proxy date later if needed
+        df['applied_date'] = pd.NaT
 
     df['issued_date'] = pd.to_datetime(df['issued_date'])
     df['applied_date'] = pd.to_datetime(df['applied_date'])
     df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
     
-    # 4. FIX: THE CEILING FILTER (No Futures)
-    df = df[df['issued_date'] <= pd.Timestamp.now()]
-
-    # 5. Calculate Velocity
+    # Logic Filters
+    df = df[df['issued_date'] <= pd.Timestamp.now()] # No future dates
     df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
-    
-    # 6. Clean Negative Durations
     df.loc[df['velocity'] < 0, 'velocity'] = None
     
     return df
