@@ -1,4 +1,9 @@
 # check_models.py
+"""
+A standalone diagnostic script to verify access to Google Generative AI models.
+It uses a manually provided API key to list all available models that support
+the 'generateContent' method, helping to debug API key or access issues.
+"""
 import os
 import google.generativeai as genai
 

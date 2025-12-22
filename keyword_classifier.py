@@ -1,3 +1,12 @@
+"""
+A standalone script for classifying permits using a keyword-based rules engine.
+
+This script fetches permits currently marked as 'Standard' and attempts to
+re-classify them as 'Strategic' or 'Commodity' based on a set of predefined
+keywords and valuation thresholds. It serves as a fast, non-AI-based method
+for initial data segmentation. This appears to be an older or alternative
+version of the logic now present in `classify_engine.py`.
+"""
 import os
 import json
 from dotenv import load_dotenv

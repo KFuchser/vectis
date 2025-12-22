@@ -1,3 +1,15 @@
+"""
+The Vectis Intelligence Engine for permit classification.
+
+This script implements a multi-level classification strategy to categorize
+permits into 'Commodity', 'Strategic', or 'Ambiguous' tiers. It is designed
+to be both cost-effective and powerful.
+
+- Level 1 (Keyword Turbo): Uses a fast, free keyword search for obvious classifications.
+- Level 2 (Pattern Grouping): Optimizes AI costs by grouping identical permit descriptions.
+- Level 3 (AI Processor): Sends unique, grouped patterns to a Generative AI for nuanced classification.
+- Level 4 (Broadcast Updates): Applies the AI's classification back to all permits sharing the pattern.
+"""
 import os
 import json
 import time

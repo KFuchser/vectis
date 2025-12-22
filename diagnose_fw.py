@@ -1,5 +1,11 @@
+"""
+A diagnostic script for scouting the Fort Worth ArcGIS MapServer endpoint.
+
+This tool connects to the root of the Permits MapServer, fetches metadata,
+and lists all available layers and their types. Its primary purpose is to
+help identify the correct layer ID for data ingestion by `ingest_velocity_50.py`.
+"""
 import requests
-import pandas as pd
 
 def diagnose_fort_worth_schema():
     print(">> DIAGNOSTICS: Scouting Fort Worth MapServer...")

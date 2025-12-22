@@ -1,3 +1,12 @@
+"""
+A standalone script for classifying permits using a Generative AI model.
+
+This script fetches unclassified permits in batches, sends their descriptions
+and valuations to a Google Gemini model, and updates their classification tier
+in Supabase based on the AI's response. It runs in a continuous loop until
+all 'Standard' permits are processed. This appears to be an alternative or
+experimental implementation of the AI classification logic.
+"""
 import os
 import json
 import time

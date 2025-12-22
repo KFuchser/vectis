@@ -1,5 +1,12 @@
+"""
+A diagnostic script to inspect the metadata of a specific ArcGIS layer.
+
+This tool targets a single layer (e.g., layer '0') on the Fort Worth MapServer
+to extract critical schema information. It identifies the unique Object ID field
+and lists all available fields and their data types, which is essential for
+correctly mapping the data in the ingestion script.
+"""
 import requests
-import json
 
 def inspect_layer_metadata():
     print(">> INSPECTING: Fort Worth Layer 0 Metadata...")

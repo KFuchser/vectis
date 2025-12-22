@@ -1,3 +1,12 @@
+"""
+The primary ETL (Extract, Transform, Load) pipeline for ingesting permit data.
+
+This script is responsible for:
+1.  Fetching raw permit data from various city sources (Austin, San Antonio, Fort Worth).
+2.  Cleaning and standardizing the data into the `PermitRecord` Pydantic model.
+3.  Calculating the "daily delta" to identify and log status changes for existing permits.
+4.  Upserting the cleaned, final records into the Supabase 'permits' table.
+"""
 import os
 import requests
 import io
@@ -10,6 +19,13 @@ from datetime import datetime
 
 # --- IMPORTS FROM OUR NEW ARCHITECTURE ---
 from service_models import PermitRecord 
+
+from datetime import timedelta  # Make sure this is imported
+
+def get_cutoff_date(days_back=30):
+    """Returns the date string (YYYY-MM-DD) for X days ago."""
+    cutoff = datetime.now() - timedelta(days=days_back)
+    return cutoff.strftime("%Y-%m-%d")
 
 load_dotenv()
 
@@ -97,6 +113,10 @@ def ingest_austin():
     Includes RETRY LOGIC for timeouts.
     """
     print(">> Ingesting Target: Austin (Socrata)...")
+
+    # DYNAMIC THRESHOLD (30 Days Lookback)
+    threshold = get_cutoff_date(30) 
+    print(f">> Fetching Austin data since: {threshold}")
     
     # Retry Loop
     for attempt in range(3):
@@ -104,7 +124,8 @@ def ingest_austin():
             client = Socrata("data.austintexas.gov", SOCRATA_TOKEN, timeout=120) # Bumped to 120s
             results = client.get(
                 "3syk-w9eu",
-                where="status_current in ('Issued', 'Final') AND issue_date > '2025-10-01'",
+                # REPLACE '2025-10-01' WITH f"{threshold}"
+                where=f"status_current in ('Issued', 'Final') AND issue_date > '{threshold}'",
                 limit=3000, 
                 order="issue_date DESC"
             )
@@ -162,6 +183,8 @@ def ingest_san_antonio():
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
     }
 
+    
+
     try:
         # Retry logic handled by requests implicitly or we can wrap, 
         # but usually getting the URL is the hard part.
@@ -192,7 +215,9 @@ def ingest_san_antonio():
         df[col_map['applied']] = pd.to_datetime(df[col_map['applied']], errors='coerce')
         
         # Filter
-        cutoff_date = pd.Timestamp('2025-10-01')
+        # DYNAMIC THRESHOLD
+        threshold_str = get_cutoff_date(30)
+        cutoff_date = pd.Timestamp(threshold_str)
         mask = (df[col_map['issue']] >= cutoff_date)
         df = df[mask].copy()
         
@@ -240,6 +265,10 @@ def ingest_fort_worth():
         "where": "1=1", "outFields": "*", "f": "json",
         "resultRecordCount": 2000, "orderByFields": "Status_Date DESC" 
     }
+
+    # DYNAMIC THRESHOLD
+    threshold_str = get_cutoff_date(30)
+    cutoff_date = pd.to_datetime(threshold_str).date()
     
     # Retry Loop
     data = {}
@@ -273,7 +302,7 @@ def ingest_fort_worth():
             if attr.get("File_Date"):
                 applied_dt = pd.to_datetime(attr.get("File_Date"), unit='ms').date()
 
-            if issued_dt and issued_dt < pd.to_datetime('2025-10-01').date(): continue
+            if issued_dt and issued_dt < cutoff_date: continue
             if issued_dt and applied_dt and issued_dt < applied_dt:
                 issued_dt, applied_dt = applied_dt, issued_dt
 
