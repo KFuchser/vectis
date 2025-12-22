@@ -1,3 +1,11 @@
+"""
+The main Streamlit dashboard for visualizing and analyzing permit data.
+
+This application connects to the Supabase data warehouse, loads permit data,
+and provides an interactive interface for filtering and exploring key metrics
+like permit volume, pipeline value, processing velocity, and friction risk.
+It includes a city-by-city leaderboard and trend charts.
+"""
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -55,10 +63,11 @@ if not url or not key:
 supabase: Client = create_client(url, key)
 
 @st.cache_data(ttl=600)
+@st.cache_data(ttl=600)
 def load_data():
     """
-    Fetches ALL data using Pagination (Robust Engine).
-    Handles 'Time Travel' dates and Type Conversion.
+    Fetches data from 'vectis_permits' (The correct table).
+    Includes Column Mapping to fix 'issue_date' vs 'issued_date' conflicts.
     """
     # 1. Pagination Loop
     all_records = []
@@ -66,7 +75,8 @@ def load_data():
     offset = 0
     
     while True:
-        response = supabase.table('permits').select("*").range(offset, offset + batch_size - 1).execute()
+        # FIX 1: Point to the new table 'vectis_permits'
+        response = supabase.table('vectis_permits').select("*").range(offset, offset + batch_size - 1).execute()
         records = response.data
         all_records.extend(records)
         if len(records) < batch_size:
@@ -78,23 +88,37 @@ def load_data():
     if df.empty:
         return df
 
-    # 2. Type Conversion
+    # FIX 2: Standardize Column Names (Safety Map)
+    # Your logs show the DB uses 'issue_date' but code expects 'issued_date'
+    column_map = {
+        'issue_date': 'issued_date',  # Map DB name to Code name
+        'work_description': 'description',
+        'est_value': 'valuation',
+        'project_cost': 'valuation'
+    }
+    df = df.rename(columns=column_map)
+
+    # 3. Type Conversion (Now safe)
+    # Handle missing columns gracefully
+    if 'issued_date' not in df.columns:
+        df['issued_date'] = pd.NaT
+    if 'applied_date' not in df.columns:
+        df['applied_date'] = pd.NaT # Handle proxy date later if needed
+
     df['issued_date'] = pd.to_datetime(df['issued_date'])
     df['applied_date'] = pd.to_datetime(df['applied_date'])
     df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
     
-    # 3. FIX: THE CEILING FILTER (No Futures)
+    # 4. FIX: THE CEILING FILTER (No Futures)
     df = df[df['issued_date'] <= pd.Timestamp.now()]
 
-    # 4. Calculate Velocity
+    # 5. Calculate Velocity
     df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
     
-    # 5. Clean Negative Durations (Visual Safety Net)
-    # Convert negatives to None so they don't skew the average, but keep the record for Volume counts
+    # 6. Clean Negative Durations
     df.loc[df['velocity'] < 0, 'velocity'] = None
     
     return df
-
 # --- 4. MAIN DASHBOARD ---
 def main():
     st.title("VECTIS INDICES")
