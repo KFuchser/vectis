@@ -181,15 +181,23 @@ def main():
     if exclude_fast:
         filtered_df = filtered_df[filtered_df['velocity'] > 0]
 
-    # NEW: DEDUPLICATION LOGIC
+    # NEW: DEDUPLICATION LOGIC (Aggressive)
     if collapse_projects and not filtered_df.empty:
-        # We assume that if City + Valuation + Issue Date are identical, it's the same project batch.
-        # We keep the first one (which acts as the Master record).
+        # AGGRESSIVE FIX: We verify "Financial Fingerprints".
+        # If City + Exact Valuation match, we assume it is the same Master Project,
+        # regardless of whether the permits were issued weeks apart (e.g. Building 1 vs Building 2).
+        
         before_count = len(filtered_df)
+        
+        # Sort by date first so we keep the earliest (start of project) or latest (completion)
+        # Let's keep the EARLIEST issued permit as the "Start" signal for the project.
+        filtered_df = filtered_df.sort_values('issued_date', ascending=True)
+        
         filtered_df = filtered_df.drop_duplicates(
-            subset=['city', 'valuation', 'issued_date'], 
+            subset=['city', 'valuation'], # Removed 'issued_date' to catch multi-building complexes
             keep='first'
         )
+        
         after_count = len(filtered_df)
         
         if before_count != after_count:
