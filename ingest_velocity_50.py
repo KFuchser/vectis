@@ -110,10 +110,10 @@ def process_daily_delta(new_df, supabase_client):
 def ingest_austin():
     """
     TARGET: Austin (Benchmark)
-    Includes RETRY LOGIC for timeouts.
+    Production Version: Includes robust Valuation mapping confirmed by Deep Scan.
     """
     print(">> Ingesting Target: Austin (Socrata)...")
-
+    
     # DYNAMIC THRESHOLD (30 Days Lookback)
     threshold = get_cutoff_date(30) 
     print(f">> Fetching Austin data since: {threshold}")
@@ -121,19 +121,18 @@ def ingest_austin():
     # Retry Loop
     for attempt in range(3):
         try:
-            client = Socrata("data.austintexas.gov", SOCRATA_TOKEN, timeout=120) # Bumped to 120s
+            client = Socrata("data.austintexas.gov", SOCRATA_TOKEN, timeout=120)
             results = client.get(
                 "3syk-w9eu",
-                # REPLACE '2025-10-01' WITH f"{threshold}"
                 where=f"status_current in ('Issued', 'Final') AND issue_date > '{threshold}'",
                 limit=3000, 
                 order="issue_date DESC"
             )
-            break # Success
+            break 
         except Exception as e:
             print(f"   ⚠️ Attempt {attempt+1} failed: {e}")
             time.sleep(5)
-            if attempt == 2: return [] # Give up
+            if attempt == 2: return []
 
     if not results:
         print("!! ALERT: No records returned from Austin API.")
@@ -145,17 +144,23 @@ def ingest_austin():
     
     for row in results:
         try:
-            # FIX: Valuation Parsing
+            # FIX: The "Kitchen Sink" Valuation Chain
+            # Confirmed via Deep Scan that 'total_job_valuation' and 'total_valuation_remodel' are key.
             val_raw = (
                 row.get("total_job_valuation") or 
                 row.get("valuation") or 
-                row.get("total_valuation_remodel")  # <--- The Missing Link
-        )
+                row.get("total_valuation_remodel") or
+                row.get("job_valuation") or 
+                row.get("est_project_cost")
+            )
+
+            # Clean string values like "$1,000.00"
             if isinstance(val_raw, str):
                 val_raw = val_raw.replace('$', '').replace(',', '')
+            
             val_float = float(val_raw) if val_raw else 0.0
 
-            # FIX: Time Travel
+            # FIX: Time Travel (Swap dates if needed)
             applied_raw = row.get("applieddate")
             issued_raw = row.get("issue_date")
             applied_dt = pd.to_datetime(applied_raw).date() if applied_raw else None
@@ -174,7 +179,7 @@ def ingest_austin():
                 status=row.get("status_current")
             )
             cleaned_records.append(permit.model_dump(mode='json'))
-        except Exception as e:
+        except Exception:
             continue
             
     print(f">> Scored Austin Records: {len(cleaned_records)}")
