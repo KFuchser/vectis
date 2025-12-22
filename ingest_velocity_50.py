@@ -146,7 +146,11 @@ def ingest_austin():
     for row in results:
         try:
             # FIX: Valuation Parsing
-            val_raw = row.get("total_job_valuation") or row.get("valuation")
+            val_raw = (
+                row.get("total_job_valuation") or 
+                row.get("valuation") or 
+                row.get("total_valuation_remodel")  # <--- The Missing Link
+        )
             if isinstance(val_raw, str):
                 val_raw = val_raw.replace('$', '').replace(',', '')
             val_float = float(val_raw) if val_raw else 0.0
