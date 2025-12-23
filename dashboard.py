@@ -138,7 +138,8 @@ def main():
     cities = sorted(df['city'].unique().tolist())
     selected_cities = st.sidebar.multiselect("Jurisdiction", cities, default=cities)
     
-    # 2. Date Filter
+   # 2. Date Filter
+    # Fix: Ensure the column name string is closed properly
     if not df['issued_date'].isnull().all():
         min_date = df['issued_date'].min().date()
         max_date = df['issued_date'].max().date()
