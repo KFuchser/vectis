@@ -22,7 +22,7 @@ class PermitRecord(BaseModel):
     description: str = "No description provided"
     valuation: float = 0.0
     status: str
-    
+    complexity_tier: str = "Standard"  # <--- NEW: Defaults to 'Standard' if missing
     # --- Segmentation ---
     # Defaults to 'Standard'. Logic in validators promotes it to 'Strategic' or 'Commodity'
     complexity_tier: str = Field(default="Standard", description="Commodity vs. Strategic")
