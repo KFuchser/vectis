@@ -1,12 +1,14 @@
 import os
+import json
 import pandas as pd
-import concurrent.futures  # ✅ Added for high-speed parallel processing
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+import google.genai as genai
+from google.genai import types
 
 # --- IMPORT THE SPOKES ---
-from service_models import PermitRecord
+from service_models import PermitRecord, ComplexityTier
 from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
@@ -17,15 +19,74 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SOCRATA_TOKEN = os.getenv("SOCRATA_APP_TOKEN")
+GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+ai_client = genai.Client(api_key=GEMINI_KEY)
 
 def get_cutoff_date(days_back=90):
     return (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d")
 
+# --- BATCH AI ENGINE (The Speed Solution) ---
+def batch_classify_permits(records: list[PermitRecord]):
+    """Processes permits in chunks of 50 to maximize speed and minimize API calls."""
+    if not records: return []
+    
+    print(f"🧠 Starting Batch Intelligence for {len(records)} records...")
+    
+    # 1. Negative Constraint Filter (Immediate cost/time savings)
+    noise = ["bedroom", "kitchen", "fence", "roofing", "hvac", "deck", "pool", "residential"]
+    to_classify = []
+    
+    for r in records:
+        if any(word in r.description.lower() for word in noise):
+            r.complexity_tier = ComplexityTier.COMMODITY
+            r.ai_rationale = "Auto-filtered: Residential noise."
+        else:
+            to_classify.append(r)
+
+    print(f"⚡ {len(to_classify)} records passed filter and require AI classification.")
+
+    # 2. Batch Processing Loop (Chunks of 50)
+    chunk_size = 50
+    for i in range(0, len(to_classify), chunk_size):
+        chunk = to_classify[i:i + chunk_size]
+        print(f"🛰️ Processing AI Chunk {i//chunk_size + 1} ({len(chunk)} permits)...")
+        
+        # Build a structured prompt for the batch
+        batch_prompt = "Classify these construction permits as 'Strategic' (Commercial/Retail) or 'Commodity' (Minor/Residential). Return JSON list of {id, tier, reason}.\n\n"
+        for idx, r in enumerate(chunk):
+            batch_prompt += f"ID {idx}: {r.description[:200]}\n"
+
+        try:
+            response = ai_client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=batch_prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            results = json.loads(response.text)
+            # Ensure we are handling a list of results
+            if isinstance(results, dict) and "results" in results:
+                results = results["results"]
+
+            for res in results:
+                try:
+                    idx = int(res.get("id"))
+                    if idx < len(chunk):
+                        chunk[idx].complexity_tier = ComplexityTier(res.get("tier"))
+                        chunk[idx].ai_rationale = res.get("reason")
+                except:
+                    continue
+        except Exception as e:
+            print(f"⚠️ Batch AI Error: {e}")
+            
+    return records
+
 # --- CORE LOGIC: DAILY DELTA ---
 def process_daily_delta(new_df, supabase_client):
     if new_df.empty: return
-    print(f">> 🕵️ Running Daily Delta check...")
+    print(f">> 🕵️ Running Daily Delta on {len(new_df)} records...")
     
     incoming_ids = new_df['permit_id'].tolist()
     existing_map = {}
@@ -56,36 +117,28 @@ def process_daily_delta(new_df, supabase_client):
 def sync_city(city_name, fetch_func, *args):
     threshold = get_cutoff_date(90)
     
-    # 1. Fetch data from the city Spoke
+    # 1. Fetch
     records = fetch_func(*args, threshold)
     if not records:
         print(f"⚠️ No new data for {city_name}")
         return
 
-    # 🚀 SPEED ENGINE: 
-    # Instead of one-by-one, we trigger the AI calls in parallel.
-    # This turns a 7-minute wait into a 30-second wait.
-    print(f"🧠 Parallel Classifying {len(records)} records for {city_name}...")
-    
-    # We use ThreadPoolExecutor to handle multiple AI requests at once
-    # PermitRecord objects run their AI logic inside the model_post_init hook
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        # We simply 'touch' each record to ensure its AI logic triggers
-        list(executor.map(lambda r: r, records))
+    # 2. Batch AI Classification
+    records = batch_classify_permits(records)
 
-    # 2. Convert to JSON/DF for processing
+    # 3. Convert to JSON/DF
     clean_json = [p.model_dump(mode='json') for p in records]
     df = pd.DataFrame(clean_json).drop_duplicates(subset=['permit_id'])
     
-    # 3. Run Delta Logic
+    # 4. Delta Logic
     process_daily_delta(df, supabase)
     
-    # 4. Upsert to Supabase
+    # 5. Upsert
     supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
     print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
 
 if __name__ == "__main__":
-    print("🚀 Starting Vectis Data Factory...")
+    print("🚀 Starting Vectis Data Factory [BATCH MODE]...")
     sync_city("Austin", get_austin_data, SOCRATA_TOKEN)
     sync_city("San Antonio", get_san_antonio_data)
     sync_city("Fort Worth", get_fort_worth_data) 
