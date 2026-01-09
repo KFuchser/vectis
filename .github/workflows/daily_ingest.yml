@@ -2,34 +2,30 @@ name: Daily Data Factory Pipeline
 
 on:
   schedule:
-    - cron: "0 6 * * *"
-  workflow_dispatch:
+    - cron: "0 11 * * *" # Runs at 6:00 AM UTC (Daily)
+  workflow_dispatch:      # Allows manual "Push to Start"
 
 jobs:
   ingest-and-classify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.9"
+          python-version: "3.11" # Upgraded for Pydantic V2 performance
 
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
+          pip install google-generativeai # Ensuring AI library is present
 
-      - name: Run Ingestion
+      - name: Run Unified Ingestion Factory
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }} # <--- THE AI AWAKENING TRIGGER
         run: python ingest_velocity_50.py
-
-      - name: Run Keyword Classifier
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
-        run: python keyword_classifier.py
