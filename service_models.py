@@ -2,7 +2,7 @@ import os
 import json
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field, model_post_init
+from pydantic import BaseModel, model_post_init
 from dotenv import load_dotenv
 
 # --- UPDATED SDK IMPORTS ---
@@ -31,7 +31,6 @@ class PermitRecord(BaseModel):
     description: str
     valuation: float = 0.0
     status: str
-    # Logic fields calculated by the model
     complexity_tier: ComplexityTier = ComplexityTier.UNKNOWN
     ai_rationale: Optional[str] = None
 
@@ -39,49 +38,39 @@ class PermitRecord(BaseModel):
     def classify_record(self, __context):
         """
         Runs automatically after Pydantic validation.
-        Implements the Vectis 'Negative Constraint' logic before calling AI.
+        Implements 'Negative Constraint' logic before calling AI.
         """
-        # 1. HARD FILTER (The 'Negative Constraint' check)
-        # Prevents spending API budget on obvious residential noise
-        noise_keywords = ["bedroom", "kitchen", "fence", "roofing", "residential", "hvac replacement", "deck"]
+        # 1. HARD FILTER (Negative Constraints)
+        noise_keywords = ["bedroom", "kitchen", "fence", "roofing", "residential", "hvac", "deck"]
         desc_lower = self.description.lower()
         
         if any(word in desc_lower for word in noise_keywords):
             self.complexity_tier = ComplexityTier.COMMODITY
-            self.ai_rationale = "Automatic filter: Residential noise keyword detected."
+            self.ai_rationale = "Automatic filter: Residential noise detected."
             return
 
-        # 2. AI CLASSIFICATION (The 'Awakening')
+        # 2. AI CLASSIFICATION
         try:
             prompt = f"""
-            Classify this construction permit for a real estate dashboard.
-            City: {self.city}
-            Valuation: ${self.valuation:,.2f}
+            Classify this construction permit:
+            City: {self.city} | Valuation: ${self.valuation:,.2f}
             Description: "{self.description}"
 
-            Categorize as:
-            - 'Strategic': Commercial growth, retail build-outs, new businesses.
-            - 'Commodity': Minor repairs, standard maintenance, or residential work.
-
-            Return ONLY a valid JSON object with 'tier' and 'reason'.
+            Categorize as 'Strategic' (Commercial/Retail build-outs) or 'Commodity' (Minor repairs/Residential).
+            Return ONLY JSON: {{"tier": "Strategic/Commodity", "reason": "text"}}
             """
 
-            # The new Client syntax: client.models.generate_content
             response = client.models.generate_content(
                 model=MODEL_ID,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
-                )
+                config=types.GenerateContentConfig(response_mime_type="application/json")
             )
 
-            # Extract and parse JSON from Gemini response
             res_data = json.loads(response.text)
             self.complexity_tier = ComplexityTier(res_data.get("tier", "Commodity"))
             self.ai_rationale = res_data.get("reason", "AI Classification complete.")
 
         except Exception as e:
-            # Fallback to avoid crashing the whole ingestion script
-            print(f"⚠️ AI classification skipped for {self.permit_id}: {e}")
+            # Fixed the unterminated string literal here
             self.complexity_tier = ComplexityTier.COMMODITY
-            self.ai_rationale = "AI
+            self.ai_rationale = f"AI Fallback: {str(e)}"
