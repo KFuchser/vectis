@@ -126,16 +126,29 @@ def sync_city(city_name, fetch_func, *args):
     # 2. Batch AI Classification
     records = batch_classify_permits(records)
 
-    # 3. Convert to JSON/DF
-    clean_json = [p.model_dump(mode='json') for p in records]
+    # 3. Convert to JSON/DF with Data Cleaning
+    clean_json = []
+    for p in records:
+        data = p.model_dump(mode='json')
+        # Hardening: Ensure complexity_tier is never null for Supabase/Pandas
+        if data.get('complexity_tier') is None:
+            data['complexity_tier'] = "Unknown"
+        clean_json.append(data)
+
     df = pd.DataFrame(clean_json).drop_duplicates(subset=['permit_id'])
     
-    # 4. Delta Logic
-    process_daily_delta(df, supabase)
+    # 4. Delta Logic (Wrapped in Try/Except to prevent total failure)
+    try:
+        process_daily_delta(df, supabase)
+    except Exception as e:
+        print(f"⚠️ Delta Check failed for {city_name}, skipping to upload: {e}")
     
     # 5. Upsert
-    supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
-    print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
+    try:
+        supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
+        print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
+    except Exception as e:
+        print(f"❌ Supabase Upsert failed for {city_name}: {e}")
 
 if __name__ == "__main__":
     print("🚀 Starting Vectis Data Factory [BATCH MODE]...")
