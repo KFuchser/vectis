@@ -6,8 +6,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 # --- UPDATED SDK IMPORTS ---
-from google import genai
-from google.genai import types
+import google.genai as genai  # ✅ Explicit SDK import
+from google.genai import types  # ✅
 
 load_dotenv()
 
