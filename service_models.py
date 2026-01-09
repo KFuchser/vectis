@@ -1,98 +1,87 @@
-# --- IMPORTS ---
-from datetime import date, datetime
+import os
+import json
+from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, model_post_init
+from dotenv import load_dotenv
+
+# --- UPDATED SDK IMPORTS ---
+from google import genai
+from google.genai import types
+
+load_dotenv()
+
+# --- AI CONFIGURATION ---
+GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
+MODEL_ID = "gemini-2.0-flash"
+
+# Initialize the 2026 Client
+client = genai.Client(api_key=GEMINI_KEY)
+
+class ComplexityTier(str, Enum):
+    STRATEGIC = "Strategic"
+    COMMODITY = "Commodity"
+    UNKNOWN = "Unknown"
 
 class PermitRecord(BaseModel):
-    """
-    The Single Source of Truth for a Permit in Vectis.
-    Standardizes data from Socrata (Austin) and ArcGIS (Fort Worth/San Antonio).
-    """
-    
-    # --- Core Identity ---
     city: str
     permit_id: str
-    
-    # --- Velocity Metrics ---
-    applied_date: Optional[date] = None
-    issued_date: Optional[date] = None
-    processing_days: Optional[int] = None # Calculated: Issued - Applied
-    
-    # --- Context ---
-    description: str = "No description provided"
+    applied_date: Optional[str] = None
+    issued_date: Optional[str] = None
+    description: str
     valuation: float = 0.0
     status: str
-    
-    # --- Segmentation ---
-    # Default is 'Standard'. Logic in validators promotes/demotes it.
-    complexity_tier: str = Field(default="Standard", description="Commodity vs. Strategic")
+    # Logic fields calculated by the model
+    complexity_tier: ComplexityTier = ComplexityTier.UNKNOWN
+    ai_rationale: Optional[str] = None
 
-    # 1. VALIDATOR: Clean Dates (Handles Socrata & ArcGIS formats)
-    @field_validator('applied_date', 'issued_date', mode='before')
-    @classmethod
-    def parse_dates(cls, v):
-        if not v:
-            return None
-        if isinstance(v, (date, datetime)):
-            return v if isinstance(v, date) else v.date()
-        if isinstance(v, str):
-            try:
-                # Handle ISO format with timestamps (e.g., "2023-10-27T00:00:00")
-                return datetime.fromisoformat(v.replace('Z', '')).date()
-            except ValueError:
-                try:
-                    # Fallback for simple YYYY-MM-DD or partial strings
-                    return datetime.strptime(v[:10], '%Y-%m-%d').date()
-                except:
-                    return None
-        return v
-
-    # 2. VALIDATOR: The Logic Engine (Velocity + Negative Constraints)
-    @model_validator(mode='after')
-    def process_logic_gate(self) -> 'PermitRecord':
-        # --- A. Calculate Processing Velocity ---
-        if self.applied_date and self.issued_date:
-            delta = (self.issued_date - self.applied_date).days
-            # Filter out negative days (dirty data)
-            self.processing_days = delta if delta >= 0 else None
-        else:
-            self.processing_days = None
-
-        # --- B. Determine Complexity Tier (The "Negative Constraint" Engine) ---
-        desc_lower = self.description.lower() if self.description else ""
-        val = self.valuation or 0.0
+    @model_post_init
+    def classify_record(self, __context):
+        """
+        Runs automatically after Pydantic validation.
+        Implements the Vectis 'Negative Constraint' logic before calling AI.
+        """
+        # 1. HARD FILTER (The 'Negative Constraint' check)
+        # Prevents spending API budget on obvious residential noise
+        noise_keywords = ["bedroom", "kitchen", "fence", "roofing", "residential", "hvac replacement", "deck"]
+        desc_lower = self.description.lower()
         
-        # KEYWORD LISTS
-        # These words trigger an automatic "Commodity" classification to save AI costs
-        residential_kill_list = [
-            'bedroom', 'bathroom', 'kitchen remodel', 'adu', 'dwelling',
-            'single family', 'deck', 'fence', 'garage', 'pool', 'residence', 'home'
-        ]
-        
-        commodity_keywords = [
-            'roof', 'heater', 'driveway', 'repair', 'siding', 'solar', 'irrigation', 'tent'
-        ]
+        if any(word in desc_lower for word in noise_keywords):
+            self.complexity_tier = ComplexityTier.COMMODITY
+            self.ai_rationale = "Automatic filter: Residential noise keyword detected."
+            return
 
-        strategic_keywords = [
-            'new construction', 'commercial', 'multifamily', 'apartments', 
-            'starbucks', 'retail', 'shell', 'tenant improvement', 'hospital'
-        ]
+        # 2. AI CLASSIFICATION (The 'Awakening')
+        try:
+            prompt = f"""
+            Classify this construction permit for a real estate dashboard.
+            City: {self.city}
+            Valuation: ${self.valuation:,.2f}
+            Description: "{self.description}"
 
-        # LOGIC HIERARCHY
-        # Rule 1: Negative Constraint (Residential always wins as a demotion)
-        if any(x in desc_lower for x in residential_kill_list):
-            self.complexity_tier = "Commodity"
-        
-        # Rule 2: Commodity Keywords (Small scale maintenance)
-        elif any(x in desc_lower for x in commodity_keywords) and val < 50000:
-            self.complexity_tier = "Commodity"
-        
-        # Rule 3: Strategic Promotion (High value OR Commercial keywords)
-        elif val > 500000 or any(x in desc_lower for x in strategic_keywords):
-            self.complexity_tier = "Strategic"
-            
-        else:
-            # Rule 4: Everything else stays Standard
-            self.complexity_tier = "Standard"
+            Categorize as:
+            - 'Strategic': Commercial growth, retail build-outs, new businesses.
+            - 'Commodity': Minor repairs, standard maintenance, or residential work.
 
-        return self
+            Return ONLY a valid JSON object with 'tier' and 'reason'.
+            """
+
+            # The new Client syntax: client.models.generate_content
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
+
+            # Extract and parse JSON from Gemini response
+            res_data = json.loads(response.text)
+            self.complexity_tier = ComplexityTier(res_data.get("tier", "Commodity"))
+            self.ai_rationale = res_data.get("reason", "AI Classification complete.")
+
+        except Exception as e:
+            # Fallback to avoid crashing the whole ingestion script
+            print(f"⚠️ AI classification skipped for {self.permit_id}: {e}")
+            self.complexity_tier = ComplexityTier.COMMODITY
+            self.ai_rationale = "AI

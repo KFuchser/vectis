@@ -5,4 +5,5 @@ supabase
 python-dotenv
 sodapy
 requests
-pydantic
+pydantic>=2.0.0
+google-generativeai

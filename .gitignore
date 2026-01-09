@@ -50,3 +50,6 @@ ENV/
 .pytest_cache/
 .coverage
 .cache
+
+verify_key.py
+.env
