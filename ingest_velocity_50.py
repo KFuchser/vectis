@@ -143,13 +143,16 @@ def sync_city(city_name, fetch_func, *args):
     except Exception as e:
         print(f"⚠️ Delta Check failed: {e}")
     
-    # 5. Upsert (Hardened)
+    # 5. Upsert (Hardened with Exception Trigger)
     try:
-        supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
-        print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
+        response = supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
+        # Verify if Supabase actually accepted it
+        if hasattr(response, 'data'):
+            print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
     except Exception as e:
-        print(f"❌ Supabase Upsert failed for {city_name}: {e}")
-        print("💡 TIP: Ensure 'complexity_tier' and 'ai_rationale' columns exist in your Supabase table.")
+        print(f"❌ CRITICAL: Supabase Upsert failed for {city_name}: {e}")
+        # Raising the error here ensures the GitHub Action shows a RED X if it fails
+        raise e
 
 if __name__ == "__main__":
     print("🚀 Starting Vectis Data Factory [BATCH MODE]...")
