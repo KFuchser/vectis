@@ -2,7 +2,7 @@ import os
 import json
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, model_post_init
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 # --- UPDATED SDK IMPORTS ---
