@@ -79,4 +79,4 @@ class PermitRecord(BaseModel):
         except Exception as e:
             # If AI fails, we don't crash the factory
             self.complexity_tier = ComplexityTier.COMMODITY
-            self.ai_rationale = f"AI Skip
+            self.ai_rationale = f"AI Skip: {str(e)}"
