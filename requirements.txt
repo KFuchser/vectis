@@ -6,4 +6,4 @@ python-dotenv
 sodapy
 requests
 pydantic>=2.0.0
-google-generativeai
+google-genai

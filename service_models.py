@@ -2,12 +2,12 @@ import os
 import json
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel  # ✅ model_post_init is NOT imported
 from dotenv import load_dotenv
 
-# --- UPDATED SDK IMPORTS ---
-import google.genai as genai  # ✅ Explicit SDK import
-from google.genai import types  # ✅
+# --- EXPLICIT 2026 SDK IMPORTS ---
+import google.genai as genai  # ✅ Explicitly import the submodule
+from google.genai import types
 
 load_dotenv()
 
@@ -34,11 +34,9 @@ class PermitRecord(BaseModel):
     complexity_tier: ComplexityTier = ComplexityTier.UNKNOWN
     ai_rationale: Optional[str] = None
 
-    @model_post_init
-    def classify_record(self, __context):
+    def model_post_init(self, __context):
         """
-        Runs automatically after Pydantic validation.
-        Implements 'Negative Constraint' logic before calling AI.
+        Built-in Pydantic hook. Runs automatically after validation.
         """
         # 1. HARD FILTER (Negative Constraints)
         noise_keywords = ["bedroom", "kitchen", "fence", "roofing", "residential", "hvac", "deck"]
@@ -51,14 +49,7 @@ class PermitRecord(BaseModel):
 
         # 2. AI CLASSIFICATION
         try:
-            prompt = f"""
-            Classify this construction permit:
-            City: {self.city} | Valuation: ${self.valuation:,.2f}
-            Description: "{self.description}"
-
-            Categorize as 'Strategic' (Commercial/Retail build-outs) or 'Commodity' (Minor repairs/Residential).
-            Return ONLY JSON: {{"tier": "Strategic/Commodity", "reason": "text"}}
-            """
+            prompt = f"Classify this permit description as 'Strategic' or 'Commodity': {self.description}"
 
             response = client.models.generate_content(
                 model=MODEL_ID,
@@ -71,6 +62,5 @@ class PermitRecord(BaseModel):
             self.ai_rationale = res_data.get("reason", "AI Classification complete.")
 
         except Exception as e:
-            # Fixed the unterminated string literal here
             self.complexity_tier = ComplexityTier.COMMODITY
             self.ai_rationale = f"AI Fallback: {str(e)}"
