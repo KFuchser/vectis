@@ -123,35 +123,42 @@ def sync_city(city_name, fetch_func, *args):
         print(f"⚠️ No new data for {city_name}")
         return
 
+    # 🚀 NEW: Pre-de-duplicate by Permit ID before AI processing
+    # This saves AI costs and prevents the 'Duplicate Constrained Values' error
+    unique_records = {}
+    for r in records:
+        if r.permit_id not in unique_records:
+            unique_records[r.permit_id] = r
+    
+    records = list(unique_records.values())
+    print(f"🧹 De-duplicated {city_name}: {len(records)} unique permits remaining.")
+
     # 2. Batch AI Classification
     records = batch_classify_permits(records)
 
-    # 3. Convert to JSON/DF with null-safety
+    # 3. Convert to JSON with null-safety
     clean_json = []
     for p in records:
         p_dict = p.model_dump(mode='json')
-        # Ensure these are never None so pandas/supabase stay happy
         p_dict['complexity_tier'] = p_dict.get('complexity_tier') or "Unknown"
         p_dict['ai_rationale'] = p_dict.get('ai_rationale') or "No rationale provided."
         clean_json.append(p_dict)
 
-    df = pd.DataFrame(clean_json).drop_duplicates(subset=['permit_id'])
+    # 4. Final Dataframe Check
+    df = pd.DataFrame(clean_json)
     
-    # 4. Delta Logic
+    # 5. Delta Logic
     try:
         process_daily_delta(df, supabase)
     except Exception as e:
         print(f"⚠️ Delta Check failed: {e}")
     
-    # 5. Upsert (Hardened with Exception Trigger)
+    # 6. Upsert (Hardened)
     try:
-        response = supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
-        # Verify if Supabase actually accepted it
-        if hasattr(response, 'data'):
-            print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
+        supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
+        print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
     except Exception as e:
-        print(f"❌ CRITICAL: Supabase Upsert failed for {city_name}: {e}")
-        # Raising the error here ensures the GitHub Action shows a RED X if it fails
+        print(f"❌ Supabase Upsert failed for {city_name}: {e}")
         raise e
 
 if __name__ == "__main__":
