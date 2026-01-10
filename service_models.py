@@ -1,21 +1,29 @@
 import os
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 load_dotenv()
 
 class ComplexityTier(str, Enum):
-    STRATEGIC = "Strategic"   # High-value commercial/retail
-    COMMODITY = "Commodity"   # Residential noise/minor repairs
+    STRATEGIC = "Strategic"   # High-value: Retail, Multi-family, Industrial
+    COMMODITY = "Commodity"   # Low-value: Single Family, Trade permits (MEP)
     UNKNOWN = "Unknown"
+
+class ProjectCategory(str, Enum):
+    # SPECIFICITY FORCES ACCURACY
+    RESIDENTIAL_NEW = "Residential - New Construction"
+    RESIDENTIAL_ALTERATION = "Residential - Alteration/Addition" # Captures "Bedroom", "Patio"
+    COMMERCIAL_NEW = "Commercial - New Construction"
+    COMMERCIAL_ALTERATION = "Commercial - Tenant Improvement" # Captures "Retail", "Office"
+    INFRASTRUCTURE = "Infrastructure/Public Works"
+    TRADE_ONLY = "Trade Only (MEP/Roofing)"
 
 class PermitRecord(BaseModel):
     """
-    Lean Data Model: 
-    Intelligence logic has been moved to the Orchestrator 
-    to support High-Velocity Batching.
+    Lean Data Model (v2.0 Quality Lock)
+    Includes 'ProjectCategory' to reduce hallucination rates.
     """
     city: str
     permit_id: str
@@ -25,6 +33,7 @@ class PermitRecord(BaseModel):
     valuation: float = 0.0
     status: str
     
-    # Logic fields (Filled by Batch Processor in ingest_velocity_50.py)
+    # Logic fields (Populated by the Orchestrator)
     complexity_tier: ComplexityTier = ComplexityTier.UNKNOWN
-    ai_rationale: Optional[str] = None
+    project_category: Optional[ProjectCategory] = None
+    ai_rationale: Optional[str] = Field(description="Short reason for classification.")
