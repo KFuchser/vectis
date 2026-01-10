@@ -8,7 +8,7 @@ import google.genai as genai
 from google.genai import types
 
 # 1. CRITICAL: Imports must happen BEFORE functions use these names
-# Ensure service_models.py is updated with ProjectCategory as discussed previously
+# Ensure service_models.py is updated with ProjectCategory
 from service_models import PermitRecord, ComplexityTier, ProjectCategory
 from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
@@ -105,5 +105,132 @@ def batch_classify_permits(records: list[PermitRecord]):
             batch_prompt += f"ID {idx}: Val=${r.valuation} | Desc: {r.description[:200]}\n"
 
         try:
+            # FIX: Ensure quotes are closed and syntax is clean
             response = ai_client.models.generate_content(
-                model="gemini-2.0-flash
+                model="gemini-2.0-flash",
+                contents=batch_prompt,
+                config=types.GenerateContentConfig(response_mime_type="application/json")
+            )
+            
+            results = json.loads(response.text)
+            data_list = results.get("results") if isinstance(results, dict) else results
+
+            for res in data_list:
+                try:
+                    idx = int(res.get("id"))
+                    if 0 <= idx < len(chunk):
+                        # Map Response to Enums
+                        tier_val = res.get("tier", "Commodity").capitalize()
+                        cat_val = res.get("category", "Residential - Alteration/Addition")
+                        
+                        chunk[idx].complexity_tier = ComplexityTier(tier_val)
+                        # We map the string back to the Enum object if possible
+                        try:
+                            chunk[idx].project_category = ProjectCategory(cat_val)
+                        except:
+                            chunk[idx].project_category = ProjectCategory.RESIDENTIAL_ALTERATION # Fallback
+                            
+                        chunk[idx].ai_rationale = res.get("reason")
+                except Exception as inner_e:
+                    print(f"Skipping record {idx}: {inner_e}")
+                    continue
+        except Exception as e:
+            print(f"⚠️ Batch AI Error: {e}")
+            
+    return records
+
+# --- CORE LOGIC: DAILY DELTA ---
+def process_daily_delta(new_df, supabase_client):
+    if new_df.empty: return
+    print(f">> 🕵️ Running Daily Delta on {len(new_df)} records...")
+    
+    incoming_ids = new_df['permit_id'].tolist()
+    existing_map = {}
+    
+    # Check existing status in batches
+    for i in range(0, len(incoming_ids), 200):
+        chunk = incoming_ids[i : i + 200]
+        resp = supabase_client.table('permits').select('permit_id, status').in_('permit_id', chunk).execute()
+        for r in resp.data:
+            existing_map[r['permit_id']] = r.get('status')
+
+    history_log = []
+    for _, row in new_df.iterrows():
+        old_status = existing_map.get(row['permit_id'])
+        # Only log if status changed AND old status wasn't None (new record)
+        if old_status and row['status'] != old_status:
+            history_log.append({
+                "permit_id": row['permit_id'],
+                "city": row['city'],
+                "previous_status": old_status,
+                "new_status": row['status'],
+                "change_date": datetime.now().date().isoformat()
+            })
+
+    if history_log:
+        try:
+            supabase_client.table('permit_history_log').insert(history_log).execute()
+            print(f">> 📝 Logged {len(history_log)} status changes.")
+        except Exception as e:
+            print(f"⚠️ Failed to log history: {e}")
+
+# --- ORCHESTRATOR ---
+def sync_city(city_name, fetch_func, *args):
+    lookback = 365 if city_name == "Fort Worth" else 90
+    threshold = get_cutoff_date(lookback)
+    
+    records = fetch_func(*args, threshold)
+    if not records:
+        print(f"⚠️ No new data found for {city_name}")
+        return
+
+    unique_records = {r.permit_id: r for r in records}
+    records = list(unique_records.values())
+    print(f"🧹 De-duplicated {city_name}: {len(records)} unique permits.")
+
+    # RUN INTELLIGENCE
+    records = batch_classify_permits(records)
+
+    clean_json = []
+    for p in records:
+        p_dict = p.model_dump(mode='json')
+        
+        # Serialize Enums explicitly to string values for JSON/DB
+        p_dict['complexity_tier'] = p_dict['complexity_tier'].value if hasattr(p_dict['complexity_tier'], 'value') else p_dict['complexity_tier']
+        p_dict['project_category'] = p_dict['project_category'].value if p_dict.get('project_category') and hasattr(p_dict['project_category'], 'value') else None
+        
+        p_dict['ai_rationale'] = p_dict.get('ai_rationale') or "No rationale provided."
+        clean_json.append(p_dict)
+
+    df = pd.DataFrame(clean_json)
+    
+    try:
+        process_daily_delta(df, supabase)
+    except Exception as e:
+        print(f"⚠️ Delta Check failed for {city_name}: {e}")
+    
+    print(f"📤 Uploading {len(clean_json)} records to Supabase...")
+    chunk_size = 500
+    try:
+        for i in range(0, len(clean_json), chunk_size):
+            batch = clean_json[i : i + chunk_size]
+            supabase.table('permits').upsert(batch, on_conflict='permit_id, city').execute()
+        print(f"✅ {city_name} Sync Complete.")
+    except Exception as e:
+        print(f"❌ Supabase Upsert failed for {city_name}: {e}")
+        # Don't raise, allow next city to process
+        pass 
+
+if __name__ == "__main__":
+    print("🚀 Starting Vectis Data Factory [BATCH MODE - QUALITY LOCK v6.0]...")
+    
+    # Austin uses Socrata
+    sync_city("Austin", get_austin_data, SOCRATA_TOKEN)
+    
+    # San Antonio uses ArcGIS
+    sync_city("San Antonio", get_san_antonio_data)
+    
+    # Fort Worth uses ArcGIS
+    sync_city("Fort Worth", get_fort_worth_data) 
+    
+    print("🏁 All syncs complete.")
