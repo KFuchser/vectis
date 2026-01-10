@@ -4,7 +4,7 @@ import altair as alt
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-from datetime import date, timedelta
+from datetime import date, datetime
 
 # Load environment variables
 load_dotenv()
@@ -19,7 +19,7 @@ VECTIS_BLUE = "#1C2B39"
 VECTIS_BRONZE = "#C87F42"
 VECTIS_BG = "#F0F4F8"
 
-# --- DATA FETCH WITH PROGRESS BAR ---
+# --- DATA FETCH ---
 @st.cache_data(ttl=300)
 def fetch_data_robust():
     if not SUPABASE_URL:
@@ -28,67 +28,58 @@ def fetch_data_robust():
         
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
-    # 1. Get Total Count First (Fast Check)
-    try:
-        count_response = supabase.table('permits').select('id', count='exact', head=True).execute()
-        total_count = count_response.count
-    except Exception as e:
-        st.error(f"Connection Error: {e}")
-        return pd.DataFrame()
-
-    if total_count == 0:
-        return pd.DataFrame()
-
-    # 2. Batched Fetching (Smart Pagination)
+    # BATCH FETCHING
     all_rows = []
-    batch_size = 3000 # Larger batch for speed
+    batch_size = 2000 
+    start = 0
     
-    # Create a placeholder for the progress bar
-    progress_text = f"Fetching {total_count} records from Supabase..."
-    my_bar = st.progress(0, text=progress_text)
+    placeholder = st.empty()
+    placeholder.text("⏳ Connecting to Database...")
     
-    for i, start in enumerate(range(0, total_count, batch_size)):
-        end = start + batch_size - 1
+    while True:
         try:
             response = supabase.table('permits').select(
                 "city, permit_id, applied_date, issued_date, valuation, complexity_tier, project_category, status"
-            ).range(start, end).execute()
+            ).range(start, start + batch_size - 1).execute()
             
-            all_rows.extend(response.data)
+            rows = response.data
+            if not rows:
+                break
+                
+            all_rows.extend(rows)
+            placeholder.text(f"⏳ Loaded {len(all_rows)} records...")
             
-            # Update Progress
-            percent_complete = min((len(all_rows) / total_count), 1.0)
-            my_bar.progress(percent_complete, text=f"Loading: {len(all_rows)} / {total_count} records...")
+            if len(rows) < batch_size:
+                break
+                
+            start += batch_size
             
         except Exception as e:
-            st.error(f"Batch Error at {start}: {e}")
+            st.error(f"Database Error: {e}")
             break
             
-    my_bar.empty() # Clear bar when done
+    placeholder.empty()
     
     df = pd.DataFrame(all_rows)
     
     if df.empty:
         return df
 
-    # --- DATA PROCESSING ---
-    # Type Conversion
+    # --- DATA NORMALIZATION ---
     df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
     df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
     df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
     
-    # Velocity Calculation
-    df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
+    if 'project_category' in df.columns:
+        df['project_category'] = df['project_category'].fillna("Unclassified")
+    else:
+        df['project_category'] = "Unclassified"
 
-    # Logic: Keep Active (NaN) and Valid Completed (>=0). Drop Impossible (<0).
+    df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
+    
+    # Valid Mask: Keep Active (NaN) + Valid Positive Durations
     mask_valid = (df['velocity'].isna()) | (df['velocity'] >= 0)
     df = df[mask_valid]
-
-    # Handle Missing Categories
-    if 'project_category' in df.columns:
-        df['project_category'] = df['project_category'].fillna("Unclassified (Pending AI)")
-    else:
-        df['project_category'] = "Unclassified (Pending AI)"
             
     return df
 
@@ -97,11 +88,11 @@ st.title("🏛️ VECTIS INDICES")
 st.markdown("**National Regulatory Friction Index (NRFI)** | *Live Beta*")
 st.markdown("---")
 
-# Fetch Data
+# Load Data
 df = fetch_data_robust()
 
 if df.empty:
-    st.warning("No data found. Please run the ingestion script.")
+    st.error("DATABASE IS EMPTY. Please run 'ingest_velocity_50.py'.")
     st.stop()
 
 # --- SIDEBAR CONFIG ---
@@ -117,134 +108,110 @@ with st.sidebar:
     )
     
     # 2. Date Filter
-    # Default: Last 12 Months
-    today = date.today()
-    default_start = today.replace(year=today.year - 1)
+    min_db_date = df['applied_date'].min().date() if pd.notnull(df['applied_date'].min()) else date(2023,1,1)
+    max_db_date = date.today()
     
-    # Guardrail for clean date inputs
-    try:
-        start_date, end_date = st.date_input(
-            "Analysis Window",
-            value=(default_start, today),
-            max_value=today
-        )
-    except:
-        start_date, end_date = default_start, today
+    start_date, end_date = st.date_input(
+        "Analysis Window",
+        value=(min_db_date, max_db_date),
+        min_value=min_db_date,
+        max_value=max_db_date
+    )
     
-    # 3. Valuation Filter
-    min_val = st.slider("Minimum Project Valuation", 0, 1000000, 0, step=10000)
-    st.caption("Note: Austin valuation data is often $0.00.")
-    
-    # Debug Stat
     st.divider()
-    st.caption(f"🔌 Total Records Loaded: {len(df):,}")
+    st.header("Strategic Filters")
+    
+    # 3. Valuation Filter (FIXED: Number Input for Precision)
+    min_val = st.number_input(
+        "Minimum Project Valuation ($)",
+        min_value=0,
+        value=0,
+        step=1000,
+        help="Enter 0 to include permits with missing valuation (common in Austin)."
+    )
+    
+    # 4. Same-Day Filter
+    exclude_same_day = st.checkbox("Exclude Same-Day Issuance", value=True, help="Removes Over-the-Counter permits (0 days).")
+    
+    st.caption(f"Total Database Records: {len(df):,}")
 
-# --- FILTER LOGIC ---
-mask = (
-    (df['city'].isin(selected_cities)) & 
-    (df['valuation'] >= min_val) &
-    (df['applied_date'].dt.date >= start_date) &
-    (df['applied_date'].dt.date <= end_date)
-)
-filtered_df = df[mask]
+# --- FILTERING ---
+mask_city = df['city'].isin(selected_cities)
+mask_val = df['valuation'] >= min_val
+mask_date = (df['applied_date'].dt.date >= start_date) & (df['applied_date'].dt.date <= end_date)
 
-# --- SEPARATE DATAFRAMES ---
-# issued_df is ONLY for Velocity stats (Completed permits)
+filtered_df = df[mask_city & mask_val & mask_date]
+
+# --- METRICS CALCULATION ---
 issued_df = filtered_df.dropna(subset=['velocity'])
+
+# Apply Same-Day Exclude Logic ONLY to Velocity Metrics
+if exclude_same_day:
+    # Filter out 0-day velocity from metrics
+    filtered_df_vol = filtered_df[ (filtered_df['velocity'] > 0) | (filtered_df['velocity'].isna()) ]
+    issued_df_speed = issued_df[issued_df['velocity'] > 0]
+else:
+    filtered_df_vol = filtered_df
+    issued_df_speed = issued_df
 
 # METRICS ROW
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Total Volume", f"{len(filtered_df):,}", "Active + Completed")
+    st.metric("Total Volume", f"{len(filtered_df_vol):,}", "Active + Completed")
 with col2:
-    total_val = filtered_df['valuation'].sum() / 1000000
+    total_val = filtered_df_vol['valuation'].sum() / 1000000
     st.metric("Pipeline Value", f"${total_val:,.1f}M", "Total CapEx")
 with col3:
-    if not issued_df.empty:
-        avg_speed = issued_df['velocity'].median()
-        st.metric("Velocity Score", f"{avg_speed:.0f} Days", "Median Time to Issue")
+    if not issued_df_speed.empty:
+        speed = issued_df_speed['velocity'].median()
+        st.metric("Velocity Score", f"{speed:.0f} Days", "Median Time to Issue")
     else:
-        st.metric("Velocity Score", "N/A", "No Completed Permits")
+        st.metric("Velocity Score", "N/A", "-")
 with col4:
-    if not issued_df.empty:
-        std_dev = issued_df['velocity'].std()
-        st.metric("Friction Risk", f"±{std_dev:.0f} Days", "Uncertainty (Std Dev)")
+    if not issued_df_speed.empty:
+        risk = issued_df_speed['velocity'].std()
+        st.metric("Friction Risk", f"±{risk:.0f} Days", "Std Dev")
     else:
-         st.metric("Friction Risk", "N/A", "No Data")
+        st.metric("Friction Risk", "N/A", "-")
 
 st.markdown("---")
 
 # --- CHARTS ---
-if filtered_df.empty:
-    st.info("No records match your filters.")
+if filtered_df_vol.empty:
+    st.info("No records match filters.")
 else:
     c1, c2 = st.columns([2, 1])
 
     with c1:
         st.subheader("📉 Bureaucracy Leaderboard")
-        
-        # Leaderboard uses issued_df (Velocity)
-        if not issued_df.empty:
-            leaderboard = issued_df.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
-            leaderboard.columns = ['Jurisdiction', 'Speed (Lower is Better)', 'Uncertainty (Std Dev)', 'Sample Size']
-            
-            st.dataframe(
-                leaderboard.style.format({
-                    'Speed (Lower is Better)': '{:.1f} Days',
-                    'Uncertainty (Std Dev)': '±{:.1f} Days'
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+        if not issued_df_speed.empty:
+            leaderboard = issued_df_speed.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
+            leaderboard.columns = ['Jurisdiction', 'Speed (Days)', 'Risk (±Days)', 'Volume']
+            st.dataframe(leaderboard, use_container_width=True, hide_index=True)
         else:
-            st.info("No completed permits in selection.")
-        
+            st.info("No completed permits (only active ones found).")
+
         st.subheader("📈 Velocity Trends")
-        if not issued_df.empty:
-            chart_df = issued_df.copy()
-            chart_df['issue_week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
-            # Group by Week + City for readable trend lines
-            chart_data = chart_df.groupby(['issue_week', 'city'])['velocity'].median().reset_index()
+        if not issued_df_speed.empty:
+            chart_df = issued_df_speed.copy()
+            chart_df['week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
+            trend = chart_df.groupby(['week', 'city'])['velocity'].median().reset_index()
             
-            line = alt.Chart(chart_data).mark_line(point=True).encode(
-                x=alt.X('issue_week', title='Week of Issuance'),
-                y=alt.Y('velocity', title='Median Days to Issue'),
-                color=alt.Color('city', scale=alt.Scale(range=[VECTIS_BLUE, VECTIS_BRONZE, '#A0A0A0'])),
-                tooltip=['city', 'issue_week', 'velocity']
+            line = alt.Chart(trend).mark_line(point=True).encode(
+                x='week', y='velocity', color='city', tooltip=['city', 'week', 'velocity']
             ).properties(height=300)
-            
             st.altair_chart(line, use_container_width=True)
 
     with c2:
-        st.subheader("🧠 AI Complexity Mix")
-        # Uses filtered_df (All Volume)
-        tier_counts = filtered_df['complexity_tier'].value_counts().reset_index()
-        tier_counts.columns = ['Tier', 'Count']
-        
-        base = alt.Chart(tier_counts).encode(theta=alt.Theta("Count", stack=True))
-        pie = base.mark_arc(outerRadius=120).encode(
-            color=alt.Color("Tier", scale=alt.Scale(domain=['Strategic', 'Commodity', 'Unknown'], range=[VECTIS_BRONZE, '#A0A0A0', VECTIS_BLUE])),
-            order=alt.Order("Count", sort="descending"),
-            tooltip=["Tier", "Count"]
-        )
-        text = base.mark_text(radius=140).encode(
-            text="Count",
-            order=alt.Order("Count", sort="descending"),
-            color=alt.value("black")  
-        )
-        st.altair_chart(pie + text, use_container_width=True)
-        
-        st.markdown("---")
-        
-        st.subheader("🔎 Category Drill-Down")
-        cat_counts = filtered_df['project_category'].value_counts().reset_index()
+        st.subheader("🧠 Project Categories")
+        # Bar Chart
+        cat_counts = filtered_df_vol['project_category'].value_counts().reset_index()
         cat_counts.columns = ['Category', 'Count']
         
         bar = alt.Chart(cat_counts).mark_bar().encode(
-            x=alt.X('Count', title=None),
-            y=alt.Y('Category', sort='-x', title=None),
+            x='Count', 
+            y=alt.Y('Category', sort='-x'), 
             color=alt.value(VECTIS_BLUE),
             tooltip=['Category', 'Count']
-        ).properties(height=250)
-        
+        ).properties(height=300)
         st.altair_chart(bar, use_container_width=True)
