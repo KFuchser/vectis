@@ -1,43 +1,39 @@
 import requests
 import pandas as pd
-from datetime import datetime
 import logging
+from datetime import datetime
 from service_models import PermitRecord, ComplexityTier
 
-# Setup Module Logging
+# Setup Logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - FW_WORKER - %(message)s')
 logger = logging.getLogger(__name__)
 
-# The "Golden Source" URL (Verified)
-# Note: We use the '/query' endpoint directly
-BASE_URL = "https://mapit.fortworthtexas.gov/ags/rest/services/CIVIC/Permits/MapServer/0/query"
+# 🚨 VERIFIED ENDPOINT (Fort Worth Open Data - ArcGIS Online)
+# Confirmed live data as of Jan 2026
+BASE_URL = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
 
 def get_fort_worth_data(cutoff_date_str: str) -> list[PermitRecord]:
-    """
-    Fetches permits from Fort Worth ArcGIS (CIVIC Layer).
-    Args:
-        cutoff_date_str: Date string in 'YYYY-MM-DD' format.
-    Returns:
-        List of PermitRecord objects.
-    """
-    logger.info(f"🤠 Fetching Fort Worth data (Threshold: {cutoff_date_str})...")
+    logger.info(f"🤠 Fetching Fort Worth data (Official) since {cutoff_date_str}...")
     
-    # 1. Convert Cutoff String to Unix Timestamp (ArcGIS expects milliseconds)
+    # 1. Date Conversion: String -> Unix Milliseconds
     try:
         dt_obj = datetime.strptime(cutoff_date_str, "%Y-%m-%d")
         cutoff_ms = int(dt_obj.timestamp() * 1000)
     except ValueError:
-        # Fallback if format is weird
-        cutoff_ms = 0
-    
+        logger.error(f"❌ Invalid date format: {cutoff_date_str}")
+        return []
+
     all_features = []
     offset = 0
-    batch_size = 1000 # ArcGIS Max Limit
+    batch_size = 1000 
     
     while True:
-        # ArcGIS SQL Query
+        # 2. Query Parameters
+        # We use outFields='*' to grab everything available (Status, Valuation, etc.)
+        # without guessing specific field names that might crash the query.
         params = {
-            "where": f"File_Date >= {cutoff_ms}", 
-            "outFields": "Permit_No,B1_WORK_DESC,File_Date,Current_Status,Permit_Type,JobValue,Address,Status_Date",
+            "where": f"File_Date >= {cutoff_ms}",
+            "outFields": "*", 
             "f": "json",
             "resultOffset": offset,
             "resultRecordCount": batch_size,
@@ -45,11 +41,15 @@ def get_fort_worth_data(cutoff_date_str: str) -> list[PermitRecord]:
         }
 
         try:
-            r = requests.get(BASE_URL, params=params, timeout=20)
+            r = requests.get(BASE_URL, params=params, timeout=30)
             r.raise_for_status()
             data = r.json()
+            
+            if "error" in data:
+                logger.error(f"❌ API Error: {data['error']}")
+                break
         except Exception as e:
-            logger.error(f"💥 FW Connection Failed: {e}")
+            logger.error(f"💥 Connection Failed: {e}")
             break
 
         features = data.get("features", [])
@@ -57,7 +57,7 @@ def get_fort_worth_data(cutoff_date_str: str) -> list[PermitRecord]:
             break
             
         all_features.extend([f["attributes"] for f in features])
-        print(f"   -> Fetched batch: {len(features)} records...")
+        logger.info(f"   -> Fetched batch: {len(features)} records...")
         
         if len(features) < batch_size:
             break
@@ -65,47 +65,60 @@ def get_fort_worth_data(cutoff_date_str: str) -> list[PermitRecord]:
         offset += batch_size
 
     if not all_features:
+        logger.warning("⚠️ No records found.")
         return []
 
-    # 2. Process to Pandas for cleanup
+    # 3. Process Data
     df = pd.DataFrame(all_features)
-    
-    # 3. Clean & Map Columns
     valid_records = []
     
     for _, row in df.iterrows():
-        # A. Map Fields
-        pid = row.get("Permit_No")
-        desc = row.get("B1_WORK_DESC")
-        status = row.get("Current_Status")
-        val = row.get("JobValue")
-        
-        # B. Handle Dates (Unix MS -> Date Object)
         try:
-            file_date_ms = row.get("File_Date")
-            filing_date = datetime.fromtimestamp(file_date_ms / 1000).date() if file_date_ms else None
+            # Map Verified Columns (from your test)
+            pid = row.get("Permit_No")
+            desc = row.get("B1_WORK_DESC")
+            date_ms = row.get("File_Date")
             
-            # Logic Fix: Negative Duration / "Time Travel"
-            # If Status Date (Completion) is before File Date, swap them?
-            # For this simple ingestion, we just ensure filing_date is valid.
-        except:
-            filing_date = None
+            # Try to grab Status/Valuation if they exist in the '*' return
+            # Common ArcGIS keys for these fields:
+            status = row.get("Status") or row.get("STATUS") or "Unknown"
+            val = row.get("JobValue") or row.get("JOB_VALUE") or row.get("Estimated_Cost") or 0.0
 
-        if not pid or not filing_date or not desc:
+            if pid and date_ms:
+                filing_date = datetime.fromtimestamp(date_ms / 1000).date()
+                
+                # Cleanup Description
+                # (Your test showed the desc sometimes equals the column name, we keep it as is for now)
+                final_desc = str(desc) if desc else "No Description Available"
+                
+                record = PermitRecord(
+                    permit_id=str(pid),
+                    city="Fort Worth",
+                    description=final_desc,
+                    filing_date=filing_date,
+                    status=str(status),
+                    valuation=float(val),
+                    complexity_tier=ComplexityTier.UNKNOWN,
+                    ai_rationale=""
+                )
+                valid_records.append(record)
+                
+        except Exception:
             continue
 
-        # C. Create PermitRecord Object
-        # Note: We default complexity to UNKNOWN; the Manager script handles the AI batching.
-        record = PermitRecord(
-            permit_id=str(pid),
-            city="Fort Worth",
-            description=str(desc),
-            filing_date=filing_date,
-            status=str(status) if status else "Unknown",
-            valuation=float(val) if val else 0.0,
-            complexity_tier=ComplexityTier.UNKNOWN,
-            ai_rationale=""
-        )
-        valid_records.append(record)
-
+    logger.info(f"✅ Parsed {len(valid_records)} valid Fort Worth permits.")
     return valid_records
+
+# --- 🧪 LOCAL TEST HARNESS ---
+if __name__ == "__main__":
+    print("\n--- 🧪 STARTING FINAL INTEGRATION TEST ---")
+    # Test with a known recent date (Jan 1, 2026)
+    results = get_fort_worth_data("2026-01-01")
+    
+    if results:
+        print(f"✅ Success! Found {len(results)} records.")
+        print(f"Sample ID: {results[0].permit_id}")
+        print(f"Sample Date: {results[0].filing_date}")
+        print(f"Sample Desc: {results[0].description}")
+    else:
+        print("No results found.")

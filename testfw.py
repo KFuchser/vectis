@@ -1,57 +1,52 @@
 import requests
-import pandas as pd
-import logging
+import json
+from datetime import datetime
 
-# Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - DEBUG - %(message)s')
-logger = logging.getLogger(__name__)
+# 🚨 THE GOLDEN KEY (From your screenshot)
+# Host: services5.arcgis.com (ArcGIS Online)
+# Org ID: 3ddLCBXe1bRt7mzj (Fort Worth Open Data)
+# Service: CFW_Open_Data_Development_Permits_View
+URL = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
 
-class FortWorthDebug:
-    # 1. THE FIX: Explicitly defined string, simplified structure
-    BASE_URL = "https://mapit.fortworthtexas.gov/ags/rest/services/CIVIC/Permits/MapServer/0/query"
+def run_test():
+    print(f"🔌 Connecting to OFFICIAL endpoint: {URL} ...")
     
-    def run_diagnostics(self):
-        logger.info("🔍 DIAGNOSTIC: Checking URL String...")
-        
-        # 2. THE CHECK: Print the raw representation to see hidden \n or \r
-        logger.info(f"   Raw URL: {repr(self.BASE_URL)}")
-        
-        if "\n" in self.BASE_URL or " " in self.BASE_URL:
-            logger.error("❌ FOUND HIDDEN 'GREMLIN' CHARACTERS IN URL!")
-            self.BASE_URL = self.BASE_URL.strip()
-            logger.info("   ✅ Cleaned URL.")
-            
-        self.fetch_sample()
+    # Query: Get the 3 most recent permits
+    params = {
+        "where": "1=1",
+        "outFields": "Permit_No,B1_WORK_DESC,File_Date,Permit_Type", # Fields from your screenshot
+        "orderByFields": "File_Date DESC", # Order by Newest
+        "resultRecordCount": 3,
+        "f": "json"
+    }
 
-    def fetch_sample(self):
-        logger.info("🚀 Attempting connection...")
+    try:
+        r = requests.get(URL, params=params, timeout=15)
+        print(f"📡 Status Code: {r.status_code}")
         
-        params = {
-            "where": "1=1",
-            "outFields": "Permit_No,B1_WORK_DESC,File_Date",
-            "resultRecordCount": 3,
-            "f": "json"
-        }
+        data = r.json()
         
-        try:
-            r = requests.get(self.BASE_URL, params=params, timeout=10)
-            r.raise_for_status()
-            data = r.json()
+        if "error" in data:
+            print(f"❌ API Error: {data['error']}")
+            return
+
+        features = data.get("features", [])
+        print(f"✅ Success! Retrieved {len(features)} records.")
+
+        if features:
+            print("\n--- MOST RECENT RECORD ---")
+            top_record = features[0]['attributes']
+            print(json.dumps(top_record, indent=2))
             
-            if "error" in data:
-                logger.error(f"❌ API Error: {data['error']}")
-            else:
-                features = data.get("features", [])
-                logger.info(f"✅ SUCCESS! Connection verified. Fetched {len(features)} records.")
-                if features:
-                    print("\n--- SAMPLE DATA ---")
-                    print(features[0]['attributes'])
-                    
-        except requests.exceptions.InvalidURL:
-            logger.error("❌ CRITICAL: 'Invalid URL' Exception still active. Check your Python environment.")
-        except Exception as e:
-            logger.error(f"💥 Connection Failed: {e}")
+            # Verify Date
+            ms = top_record.get('File_Date')
+            if ms:
+                readable = datetime.fromtimestamp(ms / 1000)
+                print(f"\n📆 Latest Permit Date: {readable}")
+                # This should match your '2 days ago' observation
+
+    except Exception as e:
+        print(f"💥 Critical Failure: {e}")
 
 if __name__ == "__main__":
-    debugger = FortWorthDebug()
-    debugger.run_diagnostics()
+    run_test()
