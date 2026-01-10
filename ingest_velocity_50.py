@@ -123,40 +123,38 @@ def sync_city(city_name, fetch_func, *args):
         print(f"⚠️ No new data for {city_name}")
         return
 
-    # 🚀 NEW: Pre-de-duplicate by Permit ID before AI processing
-    # This saves AI costs and prevents the 'Duplicate Constrained Values' error
-    unique_records = {}
-    for r in records:
-        if r.permit_id not in unique_records:
-            unique_records[r.permit_id] = r
-    
+    # 2. De-duplicate locally to save AI costs
+    unique_records = {r.permit_id: r for r in records}
     records = list(unique_records.values())
-    print(f"🧹 De-duplicated {city_name}: {len(records)} unique permits remaining.")
+    print(f"🧹 De-duplicated {city_name}: {len(records)} unique permits.")
 
-    # 2. Batch AI Classification
+    # 3. Batch AI Classification
     records = batch_classify_permits(records)
 
-    # 3. Convert to JSON with null-safety
+    # 4. Prepare for DB with strict null-safety
     clean_json = []
     for p in records:
         p_dict = p.model_dump(mode='json')
-        p_dict['complexity_tier'] = p_dict.get('complexity_tier') or "Unknown"
+        p_dict['complexity_tier'] = p_dict.get('complexity_tier') or ComplexityTier.UNKNOWN.value
         p_dict['ai_rationale'] = p_dict.get('ai_rationale') or "No rationale provided."
         clean_json.append(p_dict)
 
-    # 4. Final Dataframe Check
     df = pd.DataFrame(clean_json)
     
-    # 5. Delta Logic
+    # 5. Delta Logic (Non-blocking)
     try:
         process_daily_delta(df, supabase)
     except Exception as e:
-        print(f"⚠️ Delta Check failed: {e}")
+        print(f"⚠️ Delta Check failed for {city_name}: {e}")
     
-    # 6. Upsert (Hardened)
+    # 6. Hardened Chunked Upsert (Prevents 504 Timeouts)
+    print(f"📤 Uploading {len(clean_json)} records to Supabase...")
+    chunk_size = 500
     try:
-        supabase.table('permits').upsert(clean_json, on_conflict='permit_id, city').execute()
-        print(f"✅ {city_name} Sync Complete: {len(clean_json)} records.")
+        for i in range(0, len(clean_json), chunk_size):
+            batch = clean_json[i : i + chunk_size]
+            supabase.table('permits').upsert(batch, on_conflict='permit_id, city').execute()
+        print(f"✅ {city_name} Sync Complete.")
     except Exception as e:
         print(f"❌ Supabase Upsert failed for {city_name}: {e}")
         raise e
