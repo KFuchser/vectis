@@ -4,7 +4,7 @@ import altair as alt
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-from datetime import date, timedelta
+from datetime import date, datetime
 
 # Load environment variables
 load_dotenv()
@@ -28,8 +28,8 @@ def fetch_data():
         
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
-    # Fetch core fields + NEW project_category
     try:
+        # Fetch broad dataset
         response = supabase.table('permits').select(
             "city, permit_id, applied_date, issued_date, valuation, complexity_tier, project_category, status"
         ).execute()
@@ -39,23 +39,29 @@ def fetch_data():
         st.error(f"Data Fetch Error: {e}")
         return pd.DataFrame()
     
-    # Type Conversion
-    if not df.empty:
-        df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
-        df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
-        df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
-        
-        # Calculate Velocity
-        df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
-        
-        # Filter negative durations (Time Travel check)
-        df = df[df['velocity'] >= 0]
-        
-        # Handle Missing Categories (The "Pending" State)
-        if 'project_category' in df.columns:
-            df['project_category'] = df['project_category'].fillna("Unclassified (Pending AI)")
-        else:
-            df['project_category'] = "Unclassified (Pending AI)"
+    if df.empty:
+        return df
+
+    # --- TYPE CONVERSION ---
+    df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
+    df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
+    df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
+    
+    # --- LOGIC: SEPARATE ACTIVE vs. COMPLETED ---
+    # 1. Calculate Velocity only where possible
+    df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
+
+    # 2. Logic Fix: Do NOT drop active permits. 
+    # Only drop records that are logically impossible (Negative Duration)
+    # We keep NaNs (Active permits) and valid positives.
+    mask_impossible = df['velocity'] < 0
+    df = df[~mask_impossible]  # Keep everything EXCEPT negative durations
+
+    # 3. Handle Missing Categories
+    if 'project_category' in df.columns:
+        df['project_category'] = df['project_category'].fillna("Unclassified (Pending AI)")
+    else:
+        df['project_category'] = "Unclassified (Pending AI)"
             
     return df
 
@@ -76,27 +82,37 @@ with st.sidebar:
     st.header("Configuration")
     
     # 1. City Filter
-    available_cities = df['city'].unique().tolist() if not df.empty else ["Austin", "Fort Worth", "San Antonio"]
+    available_cities = df['city'].unique().tolist()
     selected_cities = st.multiselect(
         "Jurisdiction", 
         available_cities,
         default=available_cities
     )
     
-    # 2. Date Filter (Restored)
-    min_date = df['applied_date'].min().date() if not df.empty else date(2023,1,1)
+    # 2. Date Filter
+    # Default to 2024-01-01 to avoid showing ancient legacy data
+    min_date = date(2024, 1, 1)
     max_date = date.today()
     
+    try:
+        db_min = df['applied_date'].min().date()
+        if pd.notnull(db_min) and db_min < min_date:
+            min_date_slider = db_min
+        else:
+            min_date_slider = min_date
+    except:
+        min_date_slider = min_date
+
     start_date, end_date = st.date_input(
         "Analysis Window",
         value=(min_date, max_date),
-        min_value=min_date,
+        min_value=min_date_slider,
         max_value=max_date
     )
     
-    # 3. Valuation Filter (Default set to 0 to show Austin data)
+    # 3. Valuation Filter
     min_val = st.slider("Minimum Project Valuation", 0, 1000000, 0, step=10000)
-    st.caption("Note: Set to $0 to include Austin (missing valuation data).")
+    st.caption("Note: Austin valuation data is often $0.00 due to API limits.")
 
 # --- FILTER LOGIC ---
 mask = (
@@ -107,38 +123,43 @@ mask = (
 )
 filtered_df = df[mask]
 
+# --- SEPARATE DATAFRAMES FOR METRICS ---
+# Volume uses everything. Velocity uses only completed items.
+issued_df = filtered_df.dropna(subset=['velocity'])
+
 # METRICS ROW
 col1, col2, col3, col4 = st.columns(4)
 with col1:
-    st.metric("Total Volume", f"{len(filtered_df):,}", "Active Permits")
+    st.metric("Total Volume", f"{len(filtered_df):,}", "Active + Completed")
 with col2:
     total_val = filtered_df['valuation'].sum() / 1000000
     st.metric("Pipeline Value", f"${total_val:,.1f}M", "Total CapEx")
 with col3:
-    if not filtered_df.empty:
-        avg_speed = filtered_df['velocity'].median()
+    if not issued_df.empty:
+        avg_speed = issued_df['velocity'].median()
         st.metric("Velocity Score", f"{avg_speed:.0f} Days", "Median Time to Issue")
     else:
-        st.metric("Velocity Score", "0 Days", "No Data")
+        st.metric("Velocity Score", "N/A", "No Completed Permits")
 with col4:
-    if not filtered_df.empty:
-        std_dev = filtered_df['velocity'].std()
+    if not issued_df.empty:
+        std_dev = issued_df['velocity'].std()
         st.metric("Friction Risk", f"±{std_dev:.0f} Days", "Uncertainty (Std Dev)")
     else:
-         st.metric("Friction Risk", "±0 Days", "No Data")
+         st.metric("Friction Risk", "N/A", "No Data")
 
 st.markdown("---")
 
 # --- CHARTS ---
 if filtered_df.empty:
-    st.info("No records match your current filters. Try lowering the Valuation slider.")
+    st.info("No records match your current filters.")
 else:
     c1, c2 = st.columns([2, 1])
 
     with c1:
         st.subheader("📉 Bureaucracy Leaderboard")
         
-        leaderboard = filtered_df.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
+        # Calculate stats only on issued permits
+        leaderboard = issued_df.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
         leaderboard.columns = ['Jurisdiction', 'Speed (Lower is Better)', 'Uncertainty (Std Dev)', 'Sample Size']
         
         st.dataframe(
@@ -151,8 +172,10 @@ else:
         )
         
         st.subheader("📈 Velocity Trends")
-        filtered_df['issue_week'] = filtered_df['issued_date'].dt.to_period('W').astype(str)
-        chart_data = filtered_df.groupby(['issue_week', 'city'])['velocity'].median().reset_index()
+        # Ensure we copy to avoid SettingWithCopy warning
+        chart_df = issued_df.copy()
+        chart_df['issue_week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
+        chart_data = chart_df.groupby(['issue_week', 'city'])['velocity'].median().reset_index()
         
         line = alt.Chart(chart_data).mark_line(point=True).encode(
             x=alt.X('issue_week', title='Week of Issuance'),
@@ -165,7 +188,7 @@ else:
 
     with c2:
         st.subheader("🧠 AI Complexity Mix")
-        
+        # Use filtered_df (Total Volume) for the Pie Chart, not just Issued
         tier_counts = filtered_df['complexity_tier'].value_counts().reset_index()
         tier_counts.columns = ['Tier', 'Count']
         
@@ -185,7 +208,6 @@ else:
         st.markdown("---")
         
         st.subheader("🔎 Category Drill-Down")
-        # Aggregation for Category
         cat_counts = filtered_df['project_category'].value_counts().reset_index()
         cat_counts.columns = ['Category', 'Count']
         
