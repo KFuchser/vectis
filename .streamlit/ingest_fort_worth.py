@@ -1,16 +1,28 @@
 import requests
 import pandas as pd
+from datetime import datetime
 from service_models import PermitRecord
 
 def get_fort_worth_data(threshold_str):
-    print(f"\n--- 🛰️ FORT WORTH SPOKE (ArcGIS 2026) ---")
+    print(f"\n--- 🛰️ FORT WORTH SPOKE (Final Calibration) ---")
     
-    # 2026 CALIBRATED ENDPOINT
-    # This is the Open Data FeatureServer for Building Permits
+    # 1. THE VERIFIED 2026 ENDPOINT
+    # Host: services.arcgis.com | Service: CFW_Development_Permits_Points | Layer: 0
     base_url = "https://services.arcgis.com/8v7963f69S16O3z0/arcgis/rest/services/CFW_Development_Permits_Points/FeatureServer/0/query"
     
-    # ArcGIS 2026 SQL Dialect: Requires DATE 'YYYY-MM-DD'
-    where_clause = f"Date_Applied >= DATE '{threshold_str}'"
+    # 2. CONVERT DATE TO MILLISECONDS
+    # Fort Worth's server stores dates as long integers. 
+    # Example: Jan 1, 2026 -> 1735707600000
+    try:
+        dt_obj = datetime.strptime(threshold_str, "%Y-%m-%d")
+        ms_threshold = int(dt_obj.timestamp() * 1000)
+    except Exception as e:
+        print(f"❌ Date conversion failed: {e}")
+        return []
+
+    # 3. BUILD THE PRECISE WHERE CLAUSE
+    # No quotes around the timestamp because it is a number
+    where_clause = f"Date_Applied >= {ms_threshold} OR Date_Issued >= {ms_threshold}"
     
     params = {
         'where': where_clause,
@@ -22,21 +34,19 @@ def get_fort_worth_data(threshold_str):
     }
 
     try:
-        # Use a generic User-Agent to prevent ArcGIS from blocking the GitHub runner
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        response = requests.get(base_url, params=params, headers=headers, timeout=30)
+        # Standard headers to ensure the server treats us as a browser
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) VectisDataFactory/1.0',
+            'Accept': 'application/json'
+        }
         
-        # Check if we got a 404 or 403
-        if response.status_code != 200:
-            print(f"❌ Server rejected request: HTTP {response.status_code}")
-            return []
-
+        response = requests.get(base_url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
         data = response.json()
         
-        # Catch ArcGIS-specific errors returned in JSON
+        # Check for ArcGIS internal errors
         if "error" in data:
             print(f"❌ ArcGIS Server Message: {data['error'].get('message')}")
-            # If 'Invalid URL' happens again, it's likely the Layer ID (0)
             return []
 
         features = data.get('features', [])
@@ -45,6 +55,7 @@ def get_fort_worth_data(threshold_str):
         for feat in features:
             attr = feat.get('attributes', {})
             
+            # ArcGIS returns milliseconds; convert back to YYYY-MM-DD
             def clean_date(ts):
                 if not ts or ts < 0: return None
                 return pd.to_datetime(ts, unit='ms').strftime('%Y-%m-%d')
