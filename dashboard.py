@@ -4,7 +4,7 @@ import altair as alt
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-from datetime import date, datetime
+from datetime import date
 
 # Load environment variables
 load_dotenv()
@@ -19,7 +19,7 @@ VECTIS_BLUE = "#1C2B39"
 VECTIS_BRONZE = "#C87F42"
 VECTIS_BG = "#F0F4F8"
 
-# --- DATA FETCH ---
+# --- DATA FETCH WITH PAGINATION ---
 @st.cache_data(ttl=300)
 def fetch_data():
     if not SUPABASE_URL:
@@ -28,36 +28,51 @@ def fetch_data():
         
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
-    try:
-        # Fetch broad dataset
-        response = supabase.table('permits').select(
-            "city, permit_id, applied_date, issued_date, valuation, complexity_tier, project_category, status"
-        ).execute()
-        
-        df = pd.DataFrame(response.data)
-    except Exception as e:
-        st.error(f"Data Fetch Error: {e}")
-        return pd.DataFrame()
+    all_rows = []
+    start = 0
+    batch_size = 1000  # Supabase Max Limit
+    
+    # Show a spinner because fetching 20k+ rows takes a few seconds
+    with st.spinner('Fetching full dataset from Supabase...'):
+        while True:
+            try:
+                # Pagination: Fetch range [start, start + 999]
+                response = supabase.table('permits').select(
+                    "city, permit_id, applied_date, issued_date, valuation, complexity_tier, project_category, status"
+                ).range(start, start + batch_size - 1).execute()
+                
+                rows = response.data
+                all_rows.extend(rows)
+                
+                # If we got less than the limit, we reached the end
+                if len(rows) < batch_size:
+                    break
+                
+                start += batch_size
+            except Exception as e:
+                st.error(f"API Error at row {start}: {e}")
+                break
+    
+    df = pd.DataFrame(all_rows)
     
     if df.empty:
         return df
 
     # --- TYPE CONVERSION ---
+    # Fix: Ensure dates are parsed correctly
     df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
     df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
     df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
     
     # --- LOGIC: SEPARATE ACTIVE vs. COMPLETED ---
-    # 1. Calculate Velocity only where possible
     df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
 
-    # 2. Logic Fix: Do NOT drop active permits. 
-    # Only drop records that are logically impossible (Negative Duration)
-    # We keep NaNs (Active permits) and valid positives.
-    mask_impossible = df['velocity'] < 0
-    df = df[~mask_impossible]  # Keep everything EXCEPT negative durations
+    # Keep NaNs (Active Permits) but drop negative durations (Impossible Data)
+    # Logic: Keep row IF velocity is NaN OR velocity >= 0
+    mask_valid = (df['velocity'].isna()) | (df['velocity'] >= 0)
+    df = df[mask_valid]
 
-    # 3. Handle Missing Categories
+    # Handle Missing Categories
     if 'project_category' in df.columns:
         df['project_category'] = df['project_category'].fillna("Unclassified (Pending AI)")
     else:
@@ -74,7 +89,7 @@ st.markdown("---")
 df = fetch_data()
 
 if df.empty:
-    st.warning("No data found in Supabase. Run the ingest script!")
+    st.warning("No data found. Please run the ingestion pipeline.")
     st.stop()
 
 # --- SIDEBAR CONFIG ---
@@ -82,7 +97,7 @@ with st.sidebar:
     st.header("Configuration")
     
     # 1. City Filter
-    available_cities = df['city'].unique().tolist()
+    available_cities = sorted(df['city'].unique().tolist())
     selected_cities = st.multiselect(
         "Jurisdiction", 
         available_cities,
@@ -90,29 +105,19 @@ with st.sidebar:
     )
     
     # 2. Date Filter
-    # Default to 2024-01-01 to avoid showing ancient legacy data
-    min_date = date(2024, 1, 1)
-    max_date = date.today()
+    # Set default to show last 12 months of data to prevent UI overload
+    today = date.today()
+    default_start = today.replace(year=today.year - 1)
     
-    try:
-        db_min = df['applied_date'].min().date()
-        if pd.notnull(db_min) and db_min < min_date:
-            min_date_slider = db_min
-        else:
-            min_date_slider = min_date
-    except:
-        min_date_slider = min_date
-
     start_date, end_date = st.date_input(
         "Analysis Window",
-        value=(min_date, max_date),
-        min_value=min_date_slider,
-        max_value=max_date
+        value=(default_start, today),
+        max_value=today
     )
     
     # 3. Valuation Filter
     min_val = st.slider("Minimum Project Valuation", 0, 1000000, 0, step=10000)
-    st.caption("Note: Austin valuation data is often $0.00 due to API limits.")
+    st.caption("Note: Austin valuation data is often $0.00.")
 
 # --- FILTER LOGIC ---
 mask = (
@@ -124,7 +129,7 @@ mask = (
 filtered_df = df[mask]
 
 # --- SEPARATE DATAFRAMES FOR METRICS ---
-# Volume uses everything. Velocity uses only completed items.
+# Active permits have NaN velocity -> Drop them only for speed metrics
 issued_df = filtered_df.dropna(subset=['velocity'])
 
 # METRICS ROW
@@ -151,7 +156,7 @@ st.markdown("---")
 
 # --- CHARTS ---
 if filtered_df.empty:
-    st.info("No records match your current filters.")
+    st.info("No records match your filters.")
 else:
     c1, c2 = st.columns([2, 1])
 
@@ -172,7 +177,6 @@ else:
         )
         
         st.subheader("📈 Velocity Trends")
-        # Ensure we copy to avoid SettingWithCopy warning
         chart_df = issued_df.copy()
         chart_df['issue_week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
         chart_data = chart_df.groupby(['issue_week', 'city'])['velocity'].median().reset_index()
@@ -188,7 +192,7 @@ else:
 
     with c2:
         st.subheader("🧠 AI Complexity Mix")
-        # Use filtered_df (Total Volume) for the Pie Chart, not just Issued
+        # Pie chart uses ALL permits (Active + Completed)
         tier_counts = filtered_df['complexity_tier'].value_counts().reset_index()
         tier_counts.columns = ['Tier', 'Count']
         
