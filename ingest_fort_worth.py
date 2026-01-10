@@ -1,124 +1,82 @@
 import requests
 import pandas as pd
-import logging
 from datetime import datetime
-from service_models import PermitRecord, ComplexityTier
+from service_models import PermitRecord, ComplexityTier # Links to your shared models
 
-# Setup Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - FW_WORKER - %(message)s')
-logger = logging.getLogger(__name__)
-
-# 🚨 VERIFIED ENDPOINT (Fort Worth Open Data - ArcGIS Online)
-# Confirmed live data as of Jan 2026
-BASE_URL = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
-
-def get_fort_worth_data(cutoff_date_str: str) -> list[PermitRecord]:
-    logger.info(f"🤠 Fetching Fort Worth data (Official) since {cutoff_date_str}...")
+def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
+    """
+    Fetches Fort Worth permits via ArcGIS REST API.
+    Returns: List[PermitRecord] to match Vectis pipeline standards.
+    """
+    print(f"🤠 Starting Fort Worth Sync (Cutoff: {cutoff_date})...")
     
-    # 1. Date Conversion: String -> Unix Milliseconds
+    # 1. Setup Endpoint
+    url = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
+    
+    # 2. Build Query Parameters
+    # Convert 'YYYY-MM-DD' to standard SQL timestamp for ArcGIS
+    # Note: ArcGIS REST is picky about date formats in queries
+    params = {
+        "where": f"Status_Date >= '{cutoff_date} 00:00:00'",
+        "outFields": "Permit_No,Status_Date,Current_Status,B1_WORK_DESC,JobValue,Permit_Type,Addr_No,Street_Name,Zip_Code",
+        "outSR": "4326",
+        "f": "json",
+        "resultRecordCount": 2000, 
+        "orderByFields": "Status_Date DESC"
+    }
+
     try:
-        dt_obj = datetime.strptime(cutoff_date_str, "%Y-%m-%d")
-        cutoff_ms = int(dt_obj.timestamp() * 1000)
-    except ValueError:
-        logger.error(f"❌ Invalid date format: {cutoff_date_str}")
-        return []
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
 
-    all_features = []
-    offset = 0
-    batch_size = 1000 
-    
-    while True:
-        # 2. Query Parameters
-        # We use outFields='*' to grab everything available (Status, Valuation, etc.)
-        # without guessing specific field names that might crash the query.
-        params = {
-            "where": f"File_Date >= {cutoff_ms}",
-            "outFields": "*", 
-            "f": "json",
-            "resultOffset": offset,
-            "resultRecordCount": batch_size,
-            "orderByFields": "File_Date DESC"
-        }
+        if "features" not in data or not data["features"]:
+            print(f"⚠️ Fort Worth: No records found since {cutoff_date}.")
+            return []
 
-        try:
-            r = requests.get(BASE_URL, params=params, timeout=30)
-            r.raise_for_status()
-            data = r.json()
-            
-            if "error" in data:
-                logger.error(f"❌ API Error: {data['error']}")
-                break
-        except Exception as e:
-            logger.error(f"💥 Connection Failed: {e}")
-            break
-
-        features = data.get("features", [])
-        if not features:
-            break
-            
-        all_features.extend([f["attributes"] for f in features])
-        logger.info(f"   -> Fetched batch: {len(features)} records...")
+        # 3. Parse Raw Data
+        raw_records = [f["attributes"] for f in data["features"]]
         
-        if len(features) < batch_size:
-            break
+        # 4. Convert to PermitRecord Objects
+        mapped_records = []
         
-        offset += batch_size
+        for r in raw_records:
+            # Handle Dates (Epoch MS to YYYY-MM-DD)
+            try:
+                # ArcGIS returns Epoch Milliseconds
+                dt = datetime.fromtimestamp(r.get('Status_Date', 0) / 1000.0)
+                iso_date = dt.strftime('%Y-%m-%d')
+            except:
+                iso_date = cutoff_date # Fallback
 
-    if not all_features:
-        logger.warning("⚠️ No records found.")
-        return []
-
-    # 3. Process Data
-    df = pd.DataFrame(all_features)
-    valid_records = []
-    
-    for _, row in df.iterrows():
-        try:
-            # Map Verified Columns (from your test)
-            pid = row.get("Permit_No")
-            desc = row.get("B1_WORK_DESC")
-            date_ms = row.get("File_Date")
+            # Handle Address Construction
+            addr = f"{r.get('Addr_No', '')} {r.get('Street_Name', '')}".strip()
             
-            # Try to grab Status/Valuation if they exist in the '*' return
-            # Common ArcGIS keys for these fields:
-            status = row.get("Status") or row.get("STATUS") or "Unknown"
-            val = row.get("JobValue") or row.get("JOB_VALUE") or row.get("Estimated_Cost") or 0.0
+            # Handle Description (Crucial for AI)
+            desc = r.get('B1_WORK_DESC', '')
+            if not desc:
+                desc = r.get('Permit_Type', 'Unspecified Permit')
 
-            if pid and date_ms:
-                filing_date = datetime.fromtimestamp(date_ms / 1000).date()
-                
-                # Cleanup Description
-                # (Your test showed the desc sometimes equals the column name, we keep it as is for now)
-                final_desc = str(desc) if desc else "No Description Available"
-                
-                record = PermitRecord(
-                    permit_id=str(pid),
-                    city="Fort Worth",
-                    description=final_desc,
-                    filing_date=filing_date,
-                    status=str(status),
-                    valuation=float(val),
-                    complexity_tier=ComplexityTier.UNKNOWN,
-                    ai_rationale=""
-                )
-                valid_records.append(record)
-                
-        except Exception:
-            continue
+            # Create the PermitRecord
+            # We map ArcGIS columns to your Pydantic model
+            record = PermitRecord(
+                permit_id=str(r.get('Permit_No')),
+                city="Fort Worth",
+                status=r.get('Current_Status', 'Unknown'),
+                issued_date=iso_date,
+                description=desc,
+                valuation=float(r.get('JobValue') or 0.0),
+                job_class=r.get('Permit_Type', 'Unknown'),
+                contractor="Unknown", # ArcGIS view doesn't expose contractor easily
+                latitude=0.0, # Not strictly needed for MVP
+                longitude=0.0,
+                complexity_tier=ComplexityTier.UNKNOWN # AI will fill this later
+            )
+            mapped_records.append(record)
+        
+        print(f"✅ Fort Worth: Retrieved & Converted {len(mapped_records)} records.")
+        return mapped_records
 
-    logger.info(f"✅ Parsed {len(valid_records)} valid Fort Worth permits.")
-    return valid_records
-
-# --- 🧪 LOCAL TEST HARNESS ---
-if __name__ == "__main__":
-    print("\n--- 🧪 STARTING FINAL INTEGRATION TEST ---")
-    # Test with a known recent date (Jan 1, 2026)
-    results = get_fort_worth_data("2026-01-01")
-    
-    if results:
-        print(f"✅ Success! Found {len(results)} records.")
-        print(f"Sample ID: {results[0].permit_id}")
-        print(f"Sample Date: {results[0].filing_date}")
-        print(f"Sample Desc: {results[0].description}")
-    else:
-        print("No results found.")
+    except Exception as e:
+        print(f"❌ Fort Worth API Error: {e}")
+        return []
