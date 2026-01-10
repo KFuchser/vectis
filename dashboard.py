@@ -4,7 +4,7 @@ import altair as alt
 from supabase import create_client, Client
 import os
 from dotenv import load_dotenv
-from datetime import date
+from datetime import date, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -19,56 +19,68 @@ VECTIS_BLUE = "#1C2B39"
 VECTIS_BRONZE = "#C87F42"
 VECTIS_BG = "#F0F4F8"
 
-# --- DATA FETCH WITH PAGINATION ---
+# --- DATA FETCH WITH PROGRESS BAR ---
 @st.cache_data(ttl=300)
-def fetch_data():
+def fetch_data_robust():
     if not SUPABASE_URL:
         st.error("Supabase URL not set")
         return pd.DataFrame()
         
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
+    # 1. Get Total Count First (Fast Check)
+    try:
+        count_response = supabase.table('permits').select('id', count='exact', head=True).execute()
+        total_count = count_response.count
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        return pd.DataFrame()
+
+    if total_count == 0:
+        return pd.DataFrame()
+
+    # 2. Batched Fetching (Smart Pagination)
     all_rows = []
-    start = 0
-    batch_size = 1000  # Supabase Max Limit
+    batch_size = 3000 # Larger batch for speed
     
-    # Show a spinner because fetching 20k+ rows takes a few seconds
-    with st.spinner('Fetching full dataset from Supabase...'):
-        while True:
-            try:
-                # Pagination: Fetch range [start, start + 999]
-                response = supabase.table('permits').select(
-                    "city, permit_id, applied_date, issued_date, valuation, complexity_tier, project_category, status"
-                ).range(start, start + batch_size - 1).execute()
-                
-                rows = response.data
-                all_rows.extend(rows)
-                
-                # If we got less than the limit, we reached the end
-                if len(rows) < batch_size:
-                    break
-                
-                start += batch_size
-            except Exception as e:
-                st.error(f"API Error at row {start}: {e}")
-                break
+    # Create a placeholder for the progress bar
+    progress_text = f"Fetching {total_count} records from Supabase..."
+    my_bar = st.progress(0, text=progress_text)
+    
+    for i, start in enumerate(range(0, total_count, batch_size)):
+        end = start + batch_size - 1
+        try:
+            response = supabase.table('permits').select(
+                "city, permit_id, applied_date, issued_date, valuation, complexity_tier, project_category, status"
+            ).range(start, end).execute()
+            
+            all_rows.extend(response.data)
+            
+            # Update Progress
+            percent_complete = min((len(all_rows) / total_count), 1.0)
+            my_bar.progress(percent_complete, text=f"Loading: {len(all_rows)} / {total_count} records...")
+            
+        except Exception as e:
+            st.error(f"Batch Error at {start}: {e}")
+            break
+            
+    my_bar.empty() # Clear bar when done
     
     df = pd.DataFrame(all_rows)
     
     if df.empty:
         return df
 
-    # --- TYPE CONVERSION ---
-    # Fix: Ensure dates are parsed correctly
+    # --- DATA PROCESSING ---
+    # Type Conversion
     df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
     df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
     df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
     
-    # --- LOGIC: SEPARATE ACTIVE vs. COMPLETED ---
+    # Velocity Calculation
     df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
 
-    # Keep NaNs (Active Permits) but drop negative durations (Impossible Data)
-    # Logic: Keep row IF velocity is NaN OR velocity >= 0
+    # Logic: Keep Active (NaN) and Valid Completed (>=0). Drop Impossible (<0).
     mask_valid = (df['velocity'].isna()) | (df['velocity'] >= 0)
     df = df[mask_valid]
 
@@ -85,11 +97,11 @@ st.title("🏛️ VECTIS INDICES")
 st.markdown("**National Regulatory Friction Index (NRFI)** | *Live Beta*")
 st.markdown("---")
 
-# Main Data Logic
-df = fetch_data()
+# Fetch Data
+df = fetch_data_robust()
 
 if df.empty:
-    st.warning("No data found. Please run the ingestion pipeline.")
+    st.warning("No data found. Please run the ingestion script.")
     st.stop()
 
 # --- SIDEBAR CONFIG ---
@@ -105,19 +117,27 @@ with st.sidebar:
     )
     
     # 2. Date Filter
-    # Set default to show last 12 months of data to prevent UI overload
+    # Default: Last 12 Months
     today = date.today()
     default_start = today.replace(year=today.year - 1)
     
-    start_date, end_date = st.date_input(
-        "Analysis Window",
-        value=(default_start, today),
-        max_value=today
-    )
+    # Guardrail for clean date inputs
+    try:
+        start_date, end_date = st.date_input(
+            "Analysis Window",
+            value=(default_start, today),
+            max_value=today
+        )
+    except:
+        start_date, end_date = default_start, today
     
     # 3. Valuation Filter
     min_val = st.slider("Minimum Project Valuation", 0, 1000000, 0, step=10000)
     st.caption("Note: Austin valuation data is often $0.00.")
+    
+    # Debug Stat
+    st.divider()
+    st.caption(f"🔌 Total Records Loaded: {len(df):,}")
 
 # --- FILTER LOGIC ---
 mask = (
@@ -128,8 +148,8 @@ mask = (
 )
 filtered_df = df[mask]
 
-# --- SEPARATE DATAFRAMES FOR METRICS ---
-# Active permits have NaN velocity -> Drop them only for speed metrics
+# --- SEPARATE DATAFRAMES ---
+# issued_df is ONLY for Velocity stats (Completed permits)
 issued_df = filtered_df.dropna(subset=['velocity'])
 
 # METRICS ROW
@@ -163,36 +183,41 @@ else:
     with c1:
         st.subheader("📉 Bureaucracy Leaderboard")
         
-        # Calculate stats only on issued permits
-        leaderboard = issued_df.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
-        leaderboard.columns = ['Jurisdiction', 'Speed (Lower is Better)', 'Uncertainty (Std Dev)', 'Sample Size']
-        
-        st.dataframe(
-            leaderboard.style.format({
-                'Speed (Lower is Better)': '{:.1f} Days',
-                'Uncertainty (Std Dev)': '±{:.1f} Days'
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+        # Leaderboard uses issued_df (Velocity)
+        if not issued_df.empty:
+            leaderboard = issued_df.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
+            leaderboard.columns = ['Jurisdiction', 'Speed (Lower is Better)', 'Uncertainty (Std Dev)', 'Sample Size']
+            
+            st.dataframe(
+                leaderboard.style.format({
+                    'Speed (Lower is Better)': '{:.1f} Days',
+                    'Uncertainty (Std Dev)': '±{:.1f} Days'
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No completed permits in selection.")
         
         st.subheader("📈 Velocity Trends")
-        chart_df = issued_df.copy()
-        chart_df['issue_week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
-        chart_data = chart_df.groupby(['issue_week', 'city'])['velocity'].median().reset_index()
-        
-        line = alt.Chart(chart_data).mark_line(point=True).encode(
-            x=alt.X('issue_week', title='Week of Issuance'),
-            y=alt.Y('velocity', title='Median Days to Issue'),
-            color=alt.Color('city', scale=alt.Scale(range=[VECTIS_BLUE, VECTIS_BRONZE, '#A0A0A0'])),
-            tooltip=['city', 'issue_week', 'velocity']
-        ).properties(height=300)
-        
-        st.altair_chart(line, use_container_width=True)
+        if not issued_df.empty:
+            chart_df = issued_df.copy()
+            chart_df['issue_week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
+            # Group by Week + City for readable trend lines
+            chart_data = chart_df.groupby(['issue_week', 'city'])['velocity'].median().reset_index()
+            
+            line = alt.Chart(chart_data).mark_line(point=True).encode(
+                x=alt.X('issue_week', title='Week of Issuance'),
+                y=alt.Y('velocity', title='Median Days to Issue'),
+                color=alt.Color('city', scale=alt.Scale(range=[VECTIS_BLUE, VECTIS_BRONZE, '#A0A0A0'])),
+                tooltip=['city', 'issue_week', 'velocity']
+            ).properties(height=300)
+            
+            st.altair_chart(line, use_container_width=True)
 
     with c2:
         st.subheader("🧠 AI Complexity Mix")
-        # Pie chart uses ALL permits (Active + Completed)
+        # Uses filtered_df (All Volume)
         tier_counts = filtered_df['complexity_tier'].value_counts().reset_index()
         tier_counts.columns = ['Tier', 'Count']
         
