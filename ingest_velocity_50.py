@@ -52,17 +52,17 @@ def sanitize_record(record: PermitRecord) -> PermitRecord:
     return record
 
 # --- BATCH AI ENGINE ---
+# --- BATCH AI ENGINE ---
 def batch_classify_permits(records: list[PermitRecord]):
     if not records: return []
     
     print(f"🧠 Starting Batch Intelligence for {len(records)} records...")
     
-    # 1. PRE-FILTER: Aggressive filtering to save tokens and reduce hallucinations
     noise = ["bedroom", "kitchen", "fence", "roofing", "hvac", "deck", "pool", "residential", "single family", "siding", "water heater"]
     to_classify = []
     
     for r in records:
-        r = sanitize_record(r) # Apply Time Travel Patch
+        r = sanitize_record(r) 
         
         desc_lower = r.description.lower()
         if any(word in desc_lower for word in noise):
@@ -74,30 +74,19 @@ def batch_classify_permits(records: list[PermitRecord]):
 
     print(f"⚡ {len(to_classify)} records require Deep AI classification.")
 
-    # 2. BATCH PROCESSING
     chunk_size = 50
     for i in range(0, len(to_classify), chunk_size):
         chunk = to_classify[i:i + chunk_size]
         print(f"🛰️ Processing AI Chunk {i//chunk_size + 1}...")
         
-        # 3. PROMPT ENGINEERING: The "Negative Constraint" Logic
+        # PROMPT: We explicitly ask for specific JSON keys
         batch_prompt = """
         You are a Permit Classification Engine. 
-        Classify these permits into a 'tier' (Strategic, Commodity) and 'category'.
+        Classify these permits.
         
-        CRITICAL NEGATIVE CONSTRAINTS:
-        1. IF description has 'office', 'studio', or 'shed' BUT is in a residential context (backyard, house, garage), CLASSIFY AS COMMODITY / RESIDENTIAL_ALTERATION.
-        2. 'Strategic' is ONLY for: New Commercial Buildings, Retail (Starbucks, etc), Multifamily (>4 units), Industrial.
-        3. 'Commodity' includes: All single-family residential (even extensive remodels), Signs, Pools.
-
-        Return valid JSON list of objects: {id, tier, category, reason}
-        
-        Valid Categories: 
-        - Residential - New Construction
-        - Residential - Alteration/Addition
-        - Commercial - New Construction
-        - Commercial - Tenant Improvement
-        - Infrastructure/Public Works
+        RULES:
+        1. Tier MUST be either 'Strategic' or 'Commodity'.
+        2. Category MUST be one of: 'Residential - New Construction', 'Residential - Alteration/Addition', 'Commercial - New Construction', 'Commercial - Tenant Improvement', 'Infrastructure/Public Works'.
         
         INPUT DATA:
         """
@@ -105,7 +94,6 @@ def batch_classify_permits(records: list[PermitRecord]):
             batch_prompt += f"ID {idx}: Val=${r.valuation} | Desc: {r.description[:200]}\n"
 
         try:
-            # FIX: Ensure quotes are closed and syntax is clean
             response = ai_client.models.generate_content(
                 model="gemini-2.0-flash",
                 contents=batch_prompt,
@@ -119,16 +107,26 @@ def batch_classify_permits(records: list[PermitRecord]):
                 try:
                     idx = int(res.get("id"))
                     if 0 <= idx < len(chunk):
-                        # Map Response to Enums
-                        tier_val = res.get("tier", "Commodity").capitalize()
-                        cat_val = res.get("category", "Residential - Alteration/Addition")
+                        # --- TRANSLATION LAYER (FIXES 'Commercial' ERROR) ---
+                        raw_tier = str(res.get("tier", "Commodity")).upper()
                         
-                        chunk[idx].complexity_tier = ComplexityTier(tier_val)
-                        # We map the string back to the Enum object if possible
+                        # Map "Commercial" or "Strategic" -> STRATEGIC
+                        if "COMMERCIAL" in raw_tier or "STRATEGIC" in raw_tier:
+                            chunk[idx].complexity_tier = ComplexityTier.STRATEGIC
+                        else:
+                            # Default to Commodity for safety
+                            chunk[idx].complexity_tier = ComplexityTier.COMMODITY
+                            
+                        # Map Category
+                        cat_val = res.get("category", "Residential - Alteration/Addition")
                         try:
                             chunk[idx].project_category = ProjectCategory(cat_val)
                         except:
-                            chunk[idx].project_category = ProjectCategory.RESIDENTIAL_ALTERATION # Fallback
+                            # Fallback if AI invents a category
+                            if chunk[idx].complexity_tier == ComplexityTier.STRATEGIC:
+                                chunk[idx].project_category = ProjectCategory.COMMERCIAL_ALTERATION
+                            else:
+                                chunk[idx].project_category = ProjectCategory.RESIDENTIAL_ALTERATION
                             
                         chunk[idx].ai_rationale = res.get("reason")
                 except Exception as inner_e:
