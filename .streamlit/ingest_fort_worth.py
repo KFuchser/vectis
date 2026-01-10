@@ -4,34 +4,32 @@ from datetime import datetime
 from service_models import PermitRecord
 
 def get_fort_worth_data(threshold_str):
-    print(f"\n--- 🛰️ FORT WORTH SPOKE (Manual Handshake) ---")
+    print(f"\n--- 🛰️ FORT WORTH SPOKE (Final Handshake) ---")
     
-    # 1. DIRECT CLOUD ENDPOINT
-    url = "https://services.arcgis.com/8v7963f69S16O3z0/ArcGIS/rest/services/CFW_Development_Permits_Points/FeatureServer/0/query"
+    # 1. THE STRIPPED-DOWN ENDPOINT
+    # We use the generic MapServer/117 which is often more 'public-friendly' than FeatureServer
+    url = "https://mapit.fortworthtexas.gov/ags/rest/services/Planning_Development/PlanningDevelopment/MapServer/117/query"
     
-    # 2. CONVERT DATE TO MILLISECONDS
+    # 2. CONVERT TO INTEGER TIMESTAMP
+    # ArcGIS 2026 back-ends are strictly numeric for date fields
     dt_obj = datetime.strptime(threshold_str, "%Y-%m-%d")
     ms_threshold = int(dt_obj.timestamp() * 1000)
 
-    # 3. USE BROWSER-COMPLIANT GET PARAMETERS
-    # We explicitly define every parameter to be ultra-compatible with ArcGIS 2026
+    # 3. NO-SPACE QUERY PARAMETERS
+    # We remove spaces in the 'where' clause to prevent URL encoding errors
     params = {
-        'where': f"Date_Applied>={ms_threshold}",
+        'where': f"Date_Applied>={ms_threshold}", 
         'outFields': 'Permit_No,B1_WORK_DESC,Date_Issued,Valuation,Permit_Status,Date_Applied',
-        'f': 'pjson', # Request pretty-printed JSON for better server compatibility
+        'f': 'json',
         'returnGeometry': 'false',
-        'resultRecordCount': '50', # Lower limit to ensure success
-        'orderByFields': 'Date_Applied DESC'
+        'resultRecordCount': 100
     }
 
     try:
-        # Standard Browser Headers
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': '*/*'
-        }
+        # We use a very basic User-Agent. Sometimes custom ones trigger WAF blocks.
+        headers = {'User-Agent': 'python-requests/2.31.0'}
         
-        # Using GET with specific headers to look like a standard browser request
+        # We use a GET request, but let the 'params' argument handle the encoding
         response = requests.get(url, params=params, headers=headers, timeout=30)
         
         if response.status_code != 200:
@@ -40,8 +38,10 @@ def get_fort_worth_data(threshold_str):
 
         data = response.json()
         
+        # Log the internal server error if it exists
         if "error" in data:
             print(f"❌ ArcGIS Server Message: {data['error'].get('message')}")
+            print(f"DEBUG: Check if 'Date_Applied' field name is correct for MapServer 117.")
             return []
 
         features = data.get('features', [])
