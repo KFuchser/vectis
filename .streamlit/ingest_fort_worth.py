@@ -4,36 +4,35 @@ from datetime import datetime
 from service_models import PermitRecord
 
 def get_fort_worth_data(threshold_str):
-    print(f"\n--- 🛰️ FORT WORTH SPOKE (Final Calibration) ---")
+    print(f"\n--- 🛰️ FORT WORTH SPOKE (Manual Handshake) ---")
     
-    # 1. THE VERIFIED 2026 CLOUD ENDPOINT
-    url = "https://services.arcgis.com/8v7963f69S16O3z0/arcgis/rest/services/CFW_Development_Permits_Points/FeatureServer/0/query"
+    # 1. DIRECT CLOUD ENDPOINT
+    url = "https://services.arcgis.com/8v7963f69S16O3z0/ArcGIS/rest/services/CFW_Development_Permits_Points/FeatureServer/0/query"
     
     # 2. CONVERT DATE TO MILLISECONDS
-    # ArcGIS internal databases use numeric timestamps (Epoch MS)
     dt_obj = datetime.strptime(threshold_str, "%Y-%m-%d")
     ms_threshold = int(dt_obj.timestamp() * 1000)
 
-    # 3. USE POST TO BYPASS "INVALID URL" ERRORS
-    # Sending parameters in 'data' instead of 'params' ensures the URL stays clean
-    payload = {
-        'where': f"Date_Applied >= {ms_threshold}",
+    # 3. USE BROWSER-COMPLIANT GET PARAMETERS
+    # We explicitly define every parameter to be ultra-compatible with ArcGIS 2026
+    params = {
+        'where': f"Date_Applied>={ms_threshold}",
         'outFields': 'Permit_No,B1_WORK_DESC,Date_Issued,Valuation,Permit_Status,Date_Applied',
-        'f': 'json',
+        'f': 'pjson', # Request pretty-printed JSON for better server compatibility
         'returnGeometry': 'false',
-        'resultRecordCount': 200,
+        'resultRecordCount': '50', # Lower limit to ensure success
         'orderByFields': 'Date_Applied DESC'
     }
 
     try:
-        # Standard headers to prevent the server from flagging us as a bot
+        # Standard Browser Headers
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Content-Type': 'application/x-www-form-urlencoded'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': '*/*'
         }
         
-        # We switch to .post() here. This is the "Magic Fix" for ArcGIS URL errors.
-        response = requests.post(url, data=payload, headers=headers, timeout=30)
+        # Using GET with specific headers to look like a standard browser request
+        response = requests.get(url, params=params, headers=headers, timeout=30)
         
         if response.status_code != 200:
             print(f"❌ Connection failed: HTTP {response.status_code}")
@@ -41,10 +40,8 @@ def get_fort_worth_data(threshold_str):
 
         data = response.json()
         
-        # Catch internal ArcGIS errors (like bad field names)
         if "error" in data:
-            print(f"❌ ArcGIS Server Error: {data['error'].get('message')}")
-            # If it says 'Invalid Field', we'll know exactly which one to fix.
+            print(f"❌ ArcGIS Server Message: {data['error'].get('message')}")
             return []
 
         features = data.get('features', [])
