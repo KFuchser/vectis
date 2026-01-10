@@ -8,12 +8,12 @@ from datetime import datetime, timedelta
 # --- CONFIG & THEME ---
 st.set_page_config(page_title="Vectis Command Console", page_icon="🏛️", layout="wide")
 
-# Correctly fetching secrets for Streamlit Cloud
+# Correctly fetching secrets for Streamlit Cloud deployment
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 except:
-    # Local fallback for development
+    # Local fallback for development environment
     from dotenv import load_dotenv
     load_dotenv()
     SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -26,7 +26,7 @@ VECTIS_BRONZE = "#C87F42"
 @st.cache_data(ttl=600)
 def fetch_strategic_data():
     if not SUPABASE_URL:
-        st.error("Supabase URL missing.")
+        st.error("Supabase URL missing. Check your secrets.")
         return pd.DataFrame()
         
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -92,5 +92,43 @@ c4.metric("Friction Risk", f"±{issued['velocity'].std():.0f} Days" if not issue
 st.markdown("---")
 
 # --- CHART LAYOUT (THE FIX) ---
-# We define these variables HERE so they exist for the 'with' blocks below
-left_col, right_col = st.columns
+# We MUST declare these variables before using the 'with' blocks
+left_col, right_col = st.columns([2, 1])
+
+with left_col:
+    st.subheader("📉 Bureaucracy Leaderboard")
+    if not issued.empty:
+        stats = issued.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
+        stats.columns = ['Jurisdiction', 'Speed (Days)', 'Risk (±Days)', 'Volume']
+        st.dataframe(stats, use_container_width=True, hide_index=True)
+        
+    st.subheader("📈 Velocity Trends")
+    if not issued.empty:
+        chart_df = issued.copy()
+        chart_df['week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
+        trend = chart_df.groupby(['week', 'city'])['velocity'].median().reset_index()
+        line = alt.Chart(trend).mark_line(point=True).encode(
+            x='week', y='velocity', color='city', tooltip=['city', 'week', 'velocity']
+        ).properties(height=300)
+        st.altair_chart(line, use_container_width=True)
+
+with right_col:
+    st.subheader("📊 Complexity Tier")
+    valid_tiers = filtered[filtered['complexity_tier'] != "Unknown"]
+    if not valid_tiers.empty:
+        tier_counts = valid_tiers['complexity_tier'].value_counts().reset_index()
+        tier_counts.columns = ['tier', 'count']
+        
+        # Consistent Zoning-Standard Palette for professional credibility
+        color_scale = alt.Scale(
+            domain=['Strategic', 'Residential', 'Commodity'],
+            range=[VECTIS_BRONZE, '#F2C94C', VECTIS_BLUE]
+        )
+        
+        pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
+            theta="count", 
+            color=alt.Color("tier", scale=color_scale, legend=alt.Legend(orient="bottom"))
+        )
+        st.altair_chart(pie, use_container_width=True)
+    else:
+        st.info("Pending AI Classification...")
