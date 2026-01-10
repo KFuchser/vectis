@@ -1,62 +1,111 @@
 import requests
 import pandas as pd
-from service_models import PermitRecord
+from datetime import datetime
+import logging
+from service_models import PermitRecord, ComplexityTier
 
-def get_fort_worth_data(threshold_str):
-    print(f"\n--- 🛰️ FORT WORTH SPOKE (ArcGIS 2026) ---")
-    
-    # Authoritative 2026 FeatureServer for Development Permits
-    # Using the FeatureServer endpoint is more robust for data extraction than MapServer
-    base_url = "https://services.arcgis.com/8v7963f69S16O3z0/arcgis/rest/services/CFW_Development_Permits_Points/FeatureServer/0/query"
-    
-    # 🛠️ THE FIX: SQL-92 DATE LITERAL
-    # ArcGIS requires the DATE 'YYYY-MM-DD' prefix to treat the string as a calendar date
-    where_clause = f"Date_Applied >= DATE '{threshold_str}' OR Date_Issued >= DATE '{threshold_str}'"
-    
-    params = {
-        'where': where_clause,
-        'outFields': 'Permit_No,B1_WORK_DESC,Date_Issued,Valuation,Permit_Status,Date_Applied',
-        'f': 'json',
-        'resultRecordCount': 500,
-        'orderByFields': 'Date_Applied DESC',
-        'returnGeometry': 'false' # Speeds up response by ignoring coordinates
-    }
+# Setup Module Logging
+logger = logging.getLogger(__name__)
 
+# The "Golden Source" URL (Verified)
+# Note: We use the '/query' endpoint directly
+BASE_URL = "https://mapit.fortworthtexas.gov/ags/rest/services/CIVIC/Permits/MapServer/0/query"
+
+def get_fort_worth_data(cutoff_date_str: str) -> list[PermitRecord]:
+    """
+    Fetches permits from Fort Worth ArcGIS (CIVIC Layer).
+    Args:
+        cutoff_date_str: Date string in 'YYYY-MM-DD' format.
+    Returns:
+        List of PermitRecord objects.
+    """
+    logger.info(f"🤠 Fetching Fort Worth data (Threshold: {cutoff_date_str})...")
+    
+    # 1. Convert Cutoff String to Unix Timestamp (ArcGIS expects milliseconds)
     try:
-        response = requests.get(base_url, params=params, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Check for server-side error messages hidden in the JSON
-        if "error" in data:
-            print(f"❌ ArcGIS Query Error: {data['error'].get('message')}")
-            return []
+        dt_obj = datetime.strptime(cutoff_date_str, "%Y-%m-%d")
+        cutoff_ms = int(dt_obj.timestamp() * 1000)
+    except ValueError:
+        # Fallback if format is weird
+        cutoff_ms = 0
+    
+    all_features = []
+    offset = 0
+    batch_size = 1000 # ArcGIS Max Limit
+    
+    while True:
+        # ArcGIS SQL Query
+        params = {
+            "where": f"File_Date >= {cutoff_ms}", 
+            "outFields": "Permit_No,B1_WORK_DESC,File_Date,Current_Status,Permit_Type,JobValue,Address,Status_Date",
+            "f": "json",
+            "resultOffset": offset,
+            "resultRecordCount": batch_size,
+            "orderByFields": "File_Date DESC"
+        }
 
-        features = data.get('features', [])
-        
-        cleaned_records = []
-        for feat in features:
-            attr = feat.get('attributes', {})
+        try:
+            r = requests.get(BASE_URL, params=params, timeout=20)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            logger.error(f"💥 FW Connection Failed: {e}")
+            break
+
+        features = data.get("features", [])
+        if not features:
+            break
             
-            # Helper: ArcGIS returns integers (ms); convert to YYYY-MM-DD
-            def clean_date(ts):
-                if not ts or ts < 0: return None
-                return pd.to_datetime(ts, unit='ms').strftime('%Y-%m-%d')
+        all_features.extend([f["attributes"] for f in features])
+        print(f"   -> Fetched batch: {len(features)} records...")
+        
+        if len(features) < batch_size:
+            break
+        
+        offset += batch_size
 
-            p = PermitRecord(
-                city="Fort Worth",
-                permit_id=str(attr.get('Permit_No')),
-                applied_date=clean_date(attr.get('Date_Applied')),
-                issued_date=clean_date(attr.get('Date_Issued')),
-                description=str(attr.get('B1_WORK_DESC') or "No Description"),
-                valuation=float(attr.get('Valuation') or 0),
-                status=str(attr.get('Permit_Status') or "Pending")
-            )
-            cleaned_records.append(p)
-
-        print(f"✅ Fort Worth: Found {len(cleaned_records)} records.")
-        return cleaned_records
-
-    except Exception as e:
-        print(f"❌ Fort Worth Spoke Failed: {e}")
+    if not all_features:
         return []
+
+    # 2. Process to Pandas for cleanup
+    df = pd.DataFrame(all_features)
+    
+    # 3. Clean & Map Columns
+    valid_records = []
+    
+    for _, row in df.iterrows():
+        # A. Map Fields
+        pid = row.get("Permit_No")
+        desc = row.get("B1_WORK_DESC")
+        status = row.get("Current_Status")
+        val = row.get("JobValue")
+        
+        # B. Handle Dates (Unix MS -> Date Object)
+        try:
+            file_date_ms = row.get("File_Date")
+            filing_date = datetime.fromtimestamp(file_date_ms / 1000).date() if file_date_ms else None
+            
+            # Logic Fix: Negative Duration / "Time Travel"
+            # If Status Date (Completion) is before File Date, swap them?
+            # For this simple ingestion, we just ensure filing_date is valid.
+        except:
+            filing_date = None
+
+        if not pid or not filing_date or not desc:
+            continue
+
+        # C. Create PermitRecord Object
+        # Note: We default complexity to UNKNOWN; the Manager script handles the AI batching.
+        record = PermitRecord(
+            permit_id=str(pid),
+            city="Fort Worth",
+            description=str(desc),
+            filing_date=filing_date,
+            status=str(status) if status else "Unknown",
+            valuation=float(val) if val else 0.0,
+            complexity_tier=ComplexityTier.UNKNOWN,
+            ai_rationale=""
+        )
+        valid_records.append(record)
+
+    return valid_records
