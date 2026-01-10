@@ -14,16 +14,16 @@ class ComplexityTier(str, Enum):
 class ProjectCategory(str, Enum):
     # SPECIFICITY FORCES ACCURACY
     RESIDENTIAL_NEW = "Residential - New Construction"
-    RESIDENTIAL_ALTERATION = "Residential - Alteration/Addition" # Captures "Bedroom", "Patio"
+    RESIDENTIAL_ALTERATION = "Residential - Alteration/Addition" 
     COMMERCIAL_NEW = "Commercial - New Construction"
-    COMMERCIAL_ALTERATION = "Commercial - Tenant Improvement" # Captures "Retail", "Office"
+    COMMERCIAL_ALTERATION = "Commercial - Tenant Improvement" 
     INFRASTRUCTURE = "Infrastructure/Public Works"
     TRADE_ONLY = "Trade Only (MEP/Roofing)"
 
 class PermitRecord(BaseModel):
     """
-    Lean Data Model (v2.0 Quality Lock)
-    Includes 'ProjectCategory' to reduce hallucination rates.
+    Lean Data Model (v2.1 Quality Lock - Hotfix)
+    Ensures backward compatibility with existing ingestors.
     """
     city: str
     permit_id: str
@@ -35,5 +35,7 @@ class PermitRecord(BaseModel):
     
     # Logic fields (Populated by the Orchestrator)
     complexity_tier: ComplexityTier = ComplexityTier.UNKNOWN
+    
+    # FIX: Explicitly set default=None so ingestors don't crash
     project_category: Optional[ProjectCategory] = None
-    ai_rationale: Optional[str] = Field(description="Short reason for classification.")
+    ai_rationale: Optional[str] = Field(default=None, description="Short reason for classification.")
