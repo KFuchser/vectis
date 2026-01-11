@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import alt as alt
 import altair as alt
 from supabase import create_client, Client
 import os
@@ -158,6 +157,6 @@ with right_col:
     # Transparency Context
     unknown_count = len(filtered[filtered['complexity_tier'] == 'Unknown'])
     if unknown_count > 0:
-        st.info(f"**Data Note:** {unknown_count:,} permits are categorized as 'Unknown'. This typically represents specialty trades (Electrical/Plumbing) or permits awaiting AI classification.")
+        st.info(f"**Data Note:** {unknown_count:,} permits are 'Unknown'. These represent specialty trades or permits pending AI classification.")
     else:
-        st.success("All current records successfully classified.")
+        st.success("All current records classified.")
