@@ -56,7 +56,7 @@ if df.empty:
     st.warning("No data found.")
     st.stop()
 
-# --- SIDEBAR: RESTORED FILTERS ---
+# --- SIDEBAR: RESTORED NUMERIC FILTER ---
 with st.sidebar:
     st.header("Story Controls")
     
@@ -66,26 +66,24 @@ with st.sidebar:
     all_tiers = ['Strategic', 'Commodity', 'Awaiting Analysis']
     sel_tiers = st.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
     
-    # RESTORED: Valuation Filter
-    min_val, max_val = int(df['valuation'].min()), int(df['valuation'].max())
-    sel_valuation = st.slider("Valuation Filter ($)", min_val, 1000000, (10000, 1000000))
+    # REVERTED: Numeric input for precision
+    min_val = st.number_input("Minimum Valuation ($)", value=10000, step=5000)
     
     exclude_noise = st.checkbox("Exclude Same-Day Permits", value=True)
     
     st.divider()
-    st.header("Legend")
+    st.header("Jurisdiction Colors")
     st.markdown(f"""
-    * **Austin:** {VECTIS_BLUE}
-    * **San Antonio:** {VECTIS_BRONZE}
-    * **Los Angeles:** {VECTIS_RED}
-    """)
+    * **Austin:** <span style='color:{VECTIS_BLUE}'>■</span>
+    * **San Antonio:** <span style='color:{VECTIS_BRONZE}'>■</span>
+    * **Los Angeles:** <span style='color:{VECTIS_RED}'>■</span>
+    """, unsafe_allow_html=True)
 
 # --- GLOBAL FILTER LOGIC ---
 mask = (
     (df['city'].isin(sel_cities)) & 
     (df['complexity_tier'].isin(sel_tiers)) & 
-    (df['valuation'] >= sel_valuation[0]) &
-    (df['valuation'] <= sel_valuation[1])
+    (df['valuation'] >= min_val)
 )
 
 filtered = df[mask]
@@ -107,7 +105,7 @@ st.markdown("---")
 left_col, right_col = st.columns([2, 1])
 
 with left_col:
-    st.subheader("📈 Velocity Trends (Interactive)")
+    st.subheader("📈 Velocity Trends")
     if not issued.empty:
         chart_df = issued.copy()
         chart_df['week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
@@ -118,13 +116,13 @@ with left_col:
             range=[VECTIS_BLUE, VECTIS_BRONZE, VECTIS_RED, '#A0A0A0']
         )
         
-        # RESTORED: Zoomable Line Chart
+        # Interactive Zoom/Pan Enabled
         line = alt.Chart(trend).mark_line(point=True).encode(
             x=alt.X('week:O', title='Week Issued'),
             y=alt.Y('velocity:Q', title='Median Days'),
             color=alt.Color('city:N', scale=city_colors),
             tooltip=['city', 'week', 'velocity']
-        ).properties(height=400).interactive() # .interactive() enables Zoom/Pan
+        ).properties(height=400).interactive()
         
         st.altair_chart(line, use_container_width=True)
 
@@ -134,22 +132,3 @@ with right_col:
     tier_counts.columns = ['tier', 'count']
     
     tier_colors = alt.Scale(
-        domain=['Strategic', 'Commodity', 'Awaiting Analysis'],
-        range=[VECTIS_BRONZE, VECTIS_BLUE, VECTIS_GREY]
-    )
-    
-    pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
-        theta=alt.Theta(field="count", type="quantitative"),
-        color=alt.Color("tier:N", scale=tier_colors),
-        tooltip=['tier', 'count']
-    ).properties(height=350).interactive()
-    
-    st.altair_chart(pie, use_container_width=True)
-
-# --- LEADERBOARD ---
-st.subheader("📉 Bureaucracy Leaderboard")
-if not issued.empty:
-    stats = issued.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
-    stats.columns = ['Jurisdiction', 'Speed (Days)', 'Risk (±Days)', 'Volume']
-    st.dataframe(stats.style.format({'Speed (Days)': '{:.0f}', 'Risk (±Days)': '±{:.0f}'}), 
-                 use_container_width=True, hide_index=True)
