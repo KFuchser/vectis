@@ -17,11 +17,9 @@ except:
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# VECTIS BRAND PALETTE
 VECTIS_BLUE = "#1C2B39"   
 VECTIS_BRONZE = "#C87F42" 
-VECTIS_RED = "#D32F2F"    # LA
-VECTIS_YELLOW = "#F2C94C" 
+VECTIS_RED = "#D32F2F"    
 VECTIS_GREY = "#D1D5DB"
 
 # --- DATA FACTORY ---
@@ -31,6 +29,8 @@ def fetch_strategic_data():
         st.error("Missing Supabase Credentials.")
         return pd.DataFrame()
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    
+    # Increased window to ensure we catch all of LA's recent ingestion
     cutoff = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
     
     response = supabase.table('permits').select("*").filter(
@@ -43,41 +43,40 @@ def fetch_strategic_data():
         df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
         df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
         df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
+        
+        # FIX: Fill missing complexity tiers so they don't get filtered out
         df['complexity_tier'] = df['complexity_tier'].fillna("Awaiting Analysis")
     return df
 
 # --- UI START ---
 st.title("🏛️ VECTIS COMMAND CONSOLE")
-st.markdown("**National Regulatory Friction Index (NRFI)** | *6-Month Strategic View*")
+st.markdown("**National Regulatory Friction Index (NRFI)**")
 
 df = fetch_strategic_data()
 
 if df.empty:
-    st.warning("No data found.")
+    st.warning("No data found in the current window.")
     st.stop()
 
-# --- SIDEBAR: RESTORED NUMERIC FILTER ---
+# --- SIDEBAR: DYNAMIC FILTERS ---
 with st.sidebar:
     st.header("Story Controls")
     
-    cities = sorted(df['city'].unique().tolist())
-    sel_cities = st.multiselect("Jurisdictions", cities, default=cities)
+    # Dynamic selection of cities found in the DB
+    available_cities = sorted(df['city'].unique().tolist())
+    sel_cities = st.multiselect("Jurisdictions", available_cities, default=available_cities)
     
-    all_tiers = ['Strategic', 'Commodity', 'Awaiting Analysis']
-    sel_tiers = st.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
+    # DYNAMIC TIER FILTER: This will now show "Residential" if it exists in the data
+    available_tiers = sorted(df['complexity_tier'].unique().tolist())
+    sel_tiers = st.multiselect("Complexity Tiers", available_tiers, default=available_tiers)
     
-    # REVERTED: Numeric input for precision
-    min_val = st.number_input("Minimum Valuation ($)", value=10000, step=5000)
+    # PRECISION NUMERIC FILTER
+    min_val = st.number_input("Minimum Valuation ($)", value=0, step=10000)
     
     exclude_noise = st.checkbox("Exclude Same-Day Permits", value=True)
     
     st.divider()
-    st.header("Jurisdiction Colors")
-    st.markdown(f"""
-    * **Austin:** <span style='color:{VECTIS_BLUE}'>■</span>
-    * **San Antonio:** <span style='color:{VECTIS_BRONZE}'>■</span>
-    * **Los Angeles:** <span style='color:{VECTIS_RED}'>■</span>
-    """, unsafe_allow_html=True)
+    st.markdown(f"**City Legend:** \n🔵 Austin | 🟠 San Antonio | 🔴 Los Angeles")
 
 # --- GLOBAL FILTER LOGIC ---
 mask = (
@@ -85,19 +84,20 @@ mask = (
     (df['complexity_tier'].isin(sel_tiers)) & 
     (df['valuation'] >= min_val)
 )
-
 filtered = df[mask]
+
 if exclude_noise:
+    # We keep NaN velocity (pending permits) but drop 0-day ones
     filtered = filtered[((filtered['velocity'] > 0) | (filtered['velocity'].isna()))]
 
 issued = filtered.dropna(subset=['velocity'])
 
 # --- KPI ROW ---
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Selected Volume", f"{len(filtered):,}", "Records")
-c2.metric("Pipeline Value", f"${(filtered['valuation'].sum()/1000000):,.1f}M", "Total CapEx")
-c3.metric("Velocity Score", f"{issued['velocity'].median():.0f} Days" if not issued.empty else "-", "Median Speed")
-c4.metric("Friction Risk", f"±{issued['velocity'].std():.0f} Days" if not issued.empty else "-", "Std Dev")
+c1.metric("Selected Volume", f"{len(filtered):,}")
+c2.metric("Pipeline Value", f"${(filtered['valuation'].sum()/1000000):,.1f}M")
+c3.metric("Velocity Score", f"{issued['velocity'].median():.0f} Days" if not issued.empty else "---")
+c4.metric("Friction Risk", f"±{issued['velocity'].std():.0f} Days" if not issued.empty else "---")
 
 st.markdown("---")
 
@@ -105,18 +105,17 @@ st.markdown("---")
 left_col, right_col = st.columns([2, 1])
 
 with left_col:
-    st.subheader("📈 Velocity Trends")
+    st.subheader("📈 Velocity Trends (Scroll to Zoom)")
     if not issued.empty:
-        chart_df = issued.copy()
-        chart_df['week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
-        trend = chart_df.groupby(['week', 'city'])['velocity'].median().reset_index()
+        trend_df = issued.copy()
+        trend_df['week'] = trend_df['issued_date'].dt.to_period('W').astype(str)
+        trend = trend_df.groupby(['week', 'city'])['velocity'].median().reset_index()
         
         city_colors = alt.Scale(
             domain=['Austin', 'San Antonio', 'Los Angeles', 'Fort Worth'],
             range=[VECTIS_BLUE, VECTIS_BRONZE, VECTIS_RED, '#A0A0A0']
         )
         
-        # Interactive Zoom/Pan Enabled
         line = alt.Chart(trend).mark_line(point=True).encode(
             x=alt.X('week:O', title='Week Issued'),
             y=alt.Y('velocity:Q', title='Median Days'),
@@ -127,27 +126,37 @@ with left_col:
         st.altair_chart(line, use_container_width=True)
 
 with right_col:
-    st.subheader("📊 Category Mix")
-    tier_counts = filtered['complexity_tier'].value_counts().reset_index()
-    tier_counts.columns = ['tier', 'count']
-    
-    tier_colors = alt.Scale(
-        domain=['Strategic', 'Commodity', 'Awaiting Analysis'],
-        range=[VECTIS_BRONZE, VECTIS_BLUE, VECTIS_GREY]
-    )
-    
-    pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
-        theta=alt.Theta(field="count", type="quantitative"),
-        color=alt.Color("tier:N", scale=tier_colors),
-        tooltip=['tier', 'count']
-    ).properties(height=350).interactive()
-    
-    st.altair_chart(pie, use_container_width=True)
+    st.subheader("📊 Tier Distribution")
+    if not filtered.empty:
+        tier_counts = filtered['complexity_tier'].value_counts().reset_index()
+        tier_counts.columns = ['tier', 'count']
+        
+        donut = alt.Chart(tier_counts).mark_arc(innerRadius=50).encode(
+            theta=alt.Theta(field="count", type="quantitative"),
+            color=alt.Color("tier:N", title="Tier"),
+            tooltip=['tier', 'count']
+        ).properties(height=350).interactive()
+        
+        st.altair_chart(donut, use_container_width=True)
 
-# --- LEADERBOARD ---
+# --- LEADERBOARD: THE LA FIX ---
 st.subheader("🏛️ Jurisdiction Friction Leaderboard")
-if not issued.empty:
-    stats = issued.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
-    stats.columns = ['Jurisdiction', 'Speed (Days)', 'Risk (±Days)', 'Volume']
-    st.dataframe(stats.style.format({'Speed (Days)': '{:.0f}', 'Risk (±Days)': '±{:.0f}'}), 
-                 use_container_width=True, hide_index=True)
+if not filtered.empty:
+    # Use dropna=False to ensure cities with missing metrics still show up
+    stats = filtered.groupby('city', dropna=False).agg({
+        'velocity': ['median', 'std'],
+        'permit_id': 'count'
+    }).reset_index()
+    
+    stats.columns = ['Jurisdiction', 'Median Days', 'Risk (±Days)', 'Volume']
+    
+    # Display the table with formatting
+    st.dataframe(
+        stats.style.format({
+            'Median Days': '{:.0f}', 
+            'Risk (±Days)': '±{:.0f}', 
+            'Volume': '{:,}'
+        }), 
+        use_container_width=True, 
+        hide_index=True
+    )
