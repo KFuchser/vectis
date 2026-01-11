@@ -132,3 +132,22 @@ with right_col:
     tier_counts.columns = ['tier', 'count']
     
     tier_colors = alt.Scale(
+        domain=['Strategic', 'Commodity', 'Awaiting Analysis'],
+        range=[VECTIS_BRONZE, VECTIS_BLUE, VECTIS_GREY]
+    )
+    
+    pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
+        theta=alt.Theta(field="count", type="quantitative"),
+        color=alt.Color("tier:N", scale=tier_colors),
+        tooltip=['tier', 'count']
+    ).properties(height=350).interactive()
+    
+    st.altair_chart(pie, use_container_width=True)
+
+# --- LEADERBOARD ---
+st.subheader("🏛️ Jurisdiction Friction Leaderboard")
+if not issued.empty:
+    stats = issued.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
+    stats.columns = ['Jurisdiction', 'Speed (Days)', 'Risk (±Days)', 'Volume']
+    st.dataframe(stats.style.format({'Speed (Days)': '{:.0f}', 'Risk (±Days)': '±{:.0f}'}), 
+                 use_container_width=True, hide_index=True)
