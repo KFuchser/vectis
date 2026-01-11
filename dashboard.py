@@ -8,28 +8,31 @@ from datetime import datetime, timedelta
 # --- CONFIG & THEME ---
 st.set_page_config(page_title="Vectis Command Console", page_icon="🏛️", layout="wide")
 
-# Correctly fetching secrets for Streamlit Cloud deployment
+# Handling secrets for both local (.env) and Cloud (st.secrets)
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 except:
-    # Local fallback for development environment
     from dotenv import load_dotenv
     load_dotenv()
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-VECTIS_BLUE = "#1C2B39"   
-VECTIS_BRONZE = "#C87F42" 
+# Vectis Architectural Brand Colors
+VECTIS_BLUE = "#1C2B39"   # Slate Blue (Standard/Commodity)
+VECTIS_BRONZE = "#C87F42" # Architectural Bronze (Strategic)
+VECTIS_YELLOW = "#F2C94C" # Zoning Yellow (Residential)
 
-# --- DATA FETCH ---
+# --- DATA FACTORY ---
 @st.cache_data(ttl=600)
 def fetch_strategic_data():
     if not SUPABASE_URL:
-        st.error("Supabase URL missing. Check your secrets.")
+        st.error("Missing Supabase Credentials.")
         return pd.DataFrame()
         
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+    
+    # 6-Month Rolling Window
     cutoff = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
     
     all_data = []
@@ -55,14 +58,14 @@ def fetch_strategic_data():
         df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
     return df
 
-# --- UI LAYOUT ---
+# --- UI START ---
 st.title("🏛️ VECTIS COMMAND CONSOLE")
 st.markdown("**National Regulatory Friction Index (NRFI)** | *6-Month Strategic View*")
 
 df = fetch_strategic_data()
 
 if df.empty:
-    st.warning("No data found in the 6-month window.")
+    st.warning("The 6-month data window is currently empty.")
     st.stop()
 
 # --- SIDEBAR ---
@@ -72,8 +75,9 @@ with st.sidebar:
     sel_cities = st.multiselect("Jurisdiction", cities, default=cities)
     min_val = st.number_input("Minimum Valuation ($)", value=10000, step=5000)
     exclude_noise = st.checkbox("Exclude Same-Day Permits", value=True)
+    st.caption(f"Syncing {len(df):,} total records...")
 
-# --- FILTERING ---
+# --- FILTER LOGIC ---
 mask = (df['city'].isin(sel_cities)) & (df['valuation'] >= min_val)
 if exclude_noise:
     filtered = df[mask & ((df['velocity'] > 0) | (df['velocity'].isna()))]
@@ -82,17 +86,17 @@ else:
 
 issued = filtered.dropna(subset=['velocity'])
 
-# --- METRICS ---
+# --- KPI ROW ---
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Total Pipeline", f"{len(filtered):,}", "Active/Closed")
 c2.metric("Pipeline Value", f"${(filtered['valuation'].sum()/1000000):,.1f}M", "Total CapEx")
 c3.metric("Velocity Score", f"{issued['velocity'].median():.0f} Days" if not issued.empty else "-", "Median Speed")
-c4.metric("Friction Risk", f"±{issued['velocity'].std():.0f} Days" if not issued.empty else "-", "Std Dev")
+c4.metric("Friction Risk", f"±{issued['velocity'].std():.0f} Days" if not issued.empty else "-", "Uncertainty")
 
 st.markdown("---")
 
-# --- CHART LAYOUT (THE FIX) ---
-# We MUST declare these variables before using the 'with' blocks
+# --- CHART LAYOUT ---
+# Explicitly defining column variables to avoid NameError
 left_col, right_col = st.columns([2, 1])
 
 with left_col:
@@ -107,9 +111,15 @@ with left_col:
         chart_df = issued.copy()
         chart_df['week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
         trend = chart_df.groupby(['week', 'city'])['velocity'].median().reset_index()
+        
+        # INTERACTIVE TREND CHART (Restored Zoom)
         line = alt.Chart(trend).mark_line(point=True).encode(
-            x='week', y='velocity', color='city', tooltip=['city', 'week', 'velocity']
-        ).properties(height=300)
+            x=alt.X('week', title='Week of Issuance'),
+            y=alt.Y('velocity', title='Median Days to Issue'),
+            color=alt.Color('city', scale=alt.Scale(range=[VECTIS_BLUE, VECTIS_BRONZE, '#A0A0A0'])),
+            tooltip=['city', 'week', 'velocity']
+        ).properties(height=350).interactive() # Enabled Zoom & Pan
+        
         st.altair_chart(line, use_container_width=True)
 
 with right_col:
@@ -119,16 +129,18 @@ with right_col:
         tier_counts = valid_tiers['complexity_tier'].value_counts().reset_index()
         tier_counts.columns = ['tier', 'count']
         
-        # Consistent Zoning-Standard Palette for professional credibility
+        # Zoning-Standard Palette Mapping
         color_scale = alt.Scale(
             domain=['Strategic', 'Residential', 'Commodity'],
-            range=[VECTIS_BRONZE, '#F2C94C', VECTIS_BLUE]
+            range=[VECTIS_BRONZE, VECTIS_YELLOW, VECTIS_BLUE]
         )
         
         pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
             theta="count", 
-            color=alt.Color("tier", scale=color_scale, legend=alt.Legend(orient="bottom"))
-        )
+            color=alt.Color("tier", scale=color_scale, legend=alt.Legend(orient="bottom")),
+            tooltip=['tier', 'count']
+        ).interactive() # Enabled Pie Interaction
+        
         st.altair_chart(pie, use_container_width=True)
     else:
         st.info("Pending AI Classification...")
