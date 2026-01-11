@@ -50,13 +50,14 @@ def fetch_strategic_data():
         df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
         df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
         
-        # --- NORMALIZATION ---
+        # --- IMPROVED NARRATIVE NORMALIZATION ---
         df['complexity_tier'] = df['complexity_tier'].astype(str).str.strip()
         def clean_tier(val):
             val = val.capitalize()
             if val in ['Strategic', 'Residential', 'Commodity']:
                 return val
-            return 'Unknown'
+            # RENAMING UNKNOWN TO AWAITING ANALYSIS
+            return 'Awaiting Analysis'
         df['complexity_tier'] = df['complexity_tier'].apply(clean_tier)
         
     return df
@@ -71,43 +72,36 @@ if df.empty:
     st.warning("The 6-month data window is currently empty.")
     st.stop()
 
-# --- SIDEBAR: DYNAMIC FILTERS ---
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("Story Controls")
     
-    # 1. Jurisdiction Filter
     cities = sorted(df['city'].unique().tolist())
     sel_cities = st.multiselect("Jurisdiction", cities, default=cities)
     
-    # 2. NEW: Tier Filter (The Story Switch)
-    all_tiers = ['Strategic', 'Residential', 'Commodity', 'Unknown']
+    # Tier Filter with the new naming
+    all_tiers = ['Strategic', 'Residential', 'Commodity', 'Awaiting Analysis']
     sel_tiers = st.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
     
-    # 3. Financial/Noise Filters
     min_val = st.number_input("Minimum Valuation ($)", value=10000, step=5000)
     exclude_noise = st.checkbox("Exclude Same-Day Permits", value=True)
     
     st.divider()
-    st.header("Legend")
+    st.header("Tier Definitions")
     st.markdown(f"""
-    * **Strategic ({VECTIS_BRONZE})**
-    * **Residential ({VECTIS_YELLOW})**
-    * **Commodity ({VECTIS_BLUE})**
-    * **Unknown ({VECTIS_GREY})**
+    * **Strategic ({VECTIS_BRONZE}):** Industrial & High-Value Commercial.
+    * **Residential ({VECTIS_YELLOW}):** Housing & Multi-family developments.
+    * **Commodity ({VECTIS_BLUE}):** Essential trade & maintenance services.
+    * **Awaiting Analysis ({VECTIS_GREY}):** Records currently being triaged by AI.
     """)
 
-# --- GLOBAL FILTER LOGIC ---
+# --- FILTER LOGIC ---
 mask = (
     (df['city'].isin(sel_cities)) & 
     (df['complexity_tier'].isin(sel_tiers)) & 
     (df['valuation'] >= min_val)
 )
-
-if exclude_noise:
-    filtered = df[mask & ((df['velocity'] > 0) | (df['velocity'].isna()))]
-else:
-    filtered = df[mask]
-
+filtered = df[mask & ((df['velocity'] > 0) | (df['velocity'].isna()))] if exclude_noise else df[mask]
 issued = filtered.dropna(subset=['velocity'])
 
 # --- KPI ROW ---
@@ -145,13 +139,11 @@ with left_col:
 
 with right_col:
     st.subheader("📊 Category Mix")
-    
-    # Pre-aggregate for solid circle
     tier_counts = filtered['complexity_tier'].value_counts().reset_index()
     tier_counts.columns = ['tier', 'count']
     
     color_scale = alt.Scale(
-        domain=['Strategic', 'Residential', 'Commodity', 'Unknown'],
+        domain=['Strategic', 'Residential', 'Commodity', 'Awaiting Analysis'],
         range=[VECTIS_BRONZE, VECTIS_YELLOW, VECTIS_BLUE, VECTIS_GREY]
     )
     
@@ -160,9 +152,12 @@ with right_col:
         color=alt.Color("tier", scale=color_scale, legend=None),
         tooltip=['tier', 'count']
     ).properties(height=350).interactive()
-    
     st.altair_chart(pie, use_container_width=True)
-    
-    # Context note
-    if len(sel_tiers) < 4:
-        st.info(f"Filtering for: {', '.join(sel_tiers)}")
+
+# --- AUDIT TABLE ---
+triage_needed = filtered[filtered['complexity_tier'] == 'Awaiting Analysis']
+if not triage_needed.empty:
+    st.markdown("---")
+    st.subheader("🕵️ Triage Queue: Records Awaiting Analysis")
+    st.dataframe(triage_needed[['city', 'permit_id', 'description', 'valuation']].head(10), 
+                 use_container_width=True, hide_index=True)
