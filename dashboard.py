@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 # --- CONFIG & THEME ---
 st.set_page_config(page_title="Vectis Command Console", page_icon="🏛️", layout="wide")
 
-# Handling secrets for both local (.env) and Cloud (st.secrets)
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
@@ -18,10 +17,9 @@ except:
     SUPABASE_URL = os.getenv("SUPABASE_URL")
     SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-# Vectis Architectural Brand Colors
-VECTIS_BLUE = "#1C2B39"   # Slate Blue (Standard/Commodity)
-VECTIS_BRONZE = "#C87F42" # Architectural Bronze (Strategic)
-VECTIS_YELLOW = "#F2C94C" # Zoning Yellow (Residential)
+VECTIS_BLUE = "#1C2B39"   
+VECTIS_BRONZE = "#C87F42" 
+VECTIS_YELLOW = "#F2C94C" 
 
 # --- DATA FACTORY ---
 @st.cache_data(ttl=600)
@@ -29,27 +27,20 @@ def fetch_strategic_data():
     if not SUPABASE_URL:
         st.error("Missing Supabase Credentials.")
         return pd.DataFrame()
-        
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    
-    # 6-Month Rolling Window
     cutoff = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
-    
     all_data = []
     batch_size = 1000
     start = 0
-    
     while True:
         response = supabase.table('permits').select("*").filter(
             'applied_date', 'gte', cutoff
         ).range(start, start + batch_size - 1).execute()
-        
         batch = response.data
         if not batch: break
         all_data.extend(batch)
         if len(batch) < batch_size: break
         start += batch_size
-
     df = pd.DataFrame(all_data)
     if not df.empty:
         df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
@@ -68,13 +59,23 @@ if df.empty:
     st.warning("The 6-month data window is currently empty.")
     st.stop()
 
-# --- SIDEBAR ---
+# --- SIDEBAR & NARRATIVE LEGEND ---
 with st.sidebar:
     st.header("Story Controls")
     cities = sorted(df['city'].unique().tolist())
     sel_cities = st.multiselect("Jurisdiction", cities, default=cities)
     min_val = st.number_input("Minimum Valuation ($)", value=10000, step=5000)
     exclude_noise = st.checkbox("Exclude Same-Day Permits", value=True)
+    
+    st.divider()
+    st.header("Vectis Tier Definitions")
+    st.markdown(f"""
+    **{VECTIS_BRONZE} Strategic** High-impact commercial, retail, and multi-family. These are the primary drivers of municipal CapEx and local tax base.
+    
+    **{VECTIS_YELLOW} Residential** Single-family dwellings and major residential additions. High-volume signals for middle-market health.
+    
+    **{VECTIS_BLUE} Commodity** Trade permits, signage, and standard administrative updates. High noise, low strategic value.
+    """)
     st.caption(f"Syncing {len(df):,} total records...")
 
 # --- FILTER LOGIC ---
@@ -83,7 +84,6 @@ if exclude_noise:
     filtered = df[mask & ((df['velocity'] > 0) | (df['velocity'].isna()))]
 else:
     filtered = df[mask]
-
 issued = filtered.dropna(subset=['velocity'])
 
 # --- KPI ROW ---
@@ -96,11 +96,11 @@ c4.metric("Friction Risk", f"±{issued['velocity'].std():.0f} Days" if not issue
 st.markdown("---")
 
 # --- CHART LAYOUT ---
-# Explicitly defining column variables to avoid NameError
 left_col, right_col = st.columns([2, 1])
 
 with left_col:
     st.subheader("📉 Bureaucracy Leaderboard")
+    st.markdown("*Benchmarking median processing speed across jurisdictions.*")
     if not issued.empty:
         stats = issued.groupby('city')['velocity'].agg(['median', 'std', 'count']).reset_index()
         stats.columns = ['Jurisdiction', 'Speed (Days)', 'Risk (±Days)', 'Volume']
@@ -112,24 +112,23 @@ with left_col:
         chart_df['week'] = chart_df['issued_date'].dt.to_period('W').astype(str)
         trend = chart_df.groupby(['week', 'city'])['velocity'].median().reset_index()
         
-        # INTERACTIVE TREND CHART (Restored Zoom)
         line = alt.Chart(trend).mark_line(point=True).encode(
             x=alt.X('week', title='Week of Issuance'),
             y=alt.Y('velocity', title='Median Days to Issue'),
             color=alt.Color('city', scale=alt.Scale(range=[VECTIS_BLUE, VECTIS_BRONZE, '#A0A0A0'])),
             tooltip=['city', 'week', 'velocity']
-        ).properties(height=350).interactive() # Enabled Zoom & Pan
-        
+        ).properties(height=350).interactive()
         st.altair_chart(line, use_container_width=True)
 
 with right_col:
     st.subheader("📊 Complexity Tier")
+    st.markdown("*Distribution of development types by impact.*")
+    
     valid_tiers = filtered[filtered['complexity_tier'] != "Unknown"]
     if not valid_tiers.empty:
         tier_counts = valid_tiers['complexity_tier'].value_counts().reset_index()
         tier_counts.columns = ['tier', 'count']
         
-        # Zoning-Standard Palette Mapping
         color_scale = alt.Scale(
             domain=['Strategic', 'Residential', 'Commodity'],
             range=[VECTIS_BRONZE, VECTIS_YELLOW, VECTIS_BLUE]
@@ -137,10 +136,15 @@ with right_col:
         
         pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
             theta="count", 
-            color=alt.Color("tier", scale=color_scale, legend=alt.Legend(orient="bottom")),
+            color=alt.Color("tier", scale=color_scale, legend=None),
             tooltip=['tier', 'count']
-        ).interactive() # Enabled Pie Interaction
+        ).interactive()
         
         st.altair_chart(pie, use_container_width=True)
+        
+        # Additional Context Box
+        st.info("""
+        **Vectis Insight:** A high 'Strategic' percentage paired with high 'Friction Risk' indicates a municipality struggling with complex commercial reviews.
+        """)
     else:
         st.info("Pending AI Classification...")
