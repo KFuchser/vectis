@@ -49,8 +49,19 @@ def fetch_strategic_data():
         df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
         df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
         df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
-        # FORCE CLASSIFICATION: Ensure every row has a string for the chart
-        df['complexity_tier'] = df['complexity_tier'].fillna("Unknown").replace("", "Unknown")
+        
+        # --- THE FIX: FORCE CATEGORIZATION ---
+        # 1. Strip whitespace and handle NaNs
+        df['complexity_tier'] = df['complexity_tier'].astype(str).str.strip()
+        # 2. Map everything to our 4 standard buckets
+        def clean_tier(val):
+            val = val.capitalize()
+            if val in ['Strategic', 'Residential', 'Commodity']:
+                return val
+            return 'Unknown'
+        
+        df['complexity_tier'] = df['complexity_tier'].apply(clean_tier)
+        
     return df
 
 # --- UI START ---
@@ -124,8 +135,7 @@ with left_col:
 with right_col:
     st.subheader("📊 Complexity Tier")
     
-    # AGGRESSIVE CHART FIX:
-    # We pre-calculate the counts to ensure the math is 100% complete
+    # Pre-aggregate to force the math to close the circle
     tier_counts = filtered['complexity_tier'].value_counts().reset_index()
     tier_counts.columns = ['tier', 'count']
     
@@ -134,7 +144,6 @@ with right_col:
         range=[VECTIS_BRONZE, VECTIS_YELLOW, VECTIS_BLUE, VECTIS_GREY]
     )
     
-    # Using 'Theta' with quantitative field forces the circle to close
     pie = alt.Chart(tier_counts).mark_arc(outerRadius=100, innerRadius=50).encode(
         theta=alt.Theta(field="count", type="quantitative"),
         color=alt.Color("tier", scale=color_scale, legend=None),
@@ -143,12 +152,15 @@ with right_col:
     
     st.altair_chart(pie, use_container_width=True)
     
-    unknowns = filtered[filtered['complexity_tier'] == 'Unknown']
-    if not unknowns.empty:
-        st.info(f"**Data Health:** {len(unknowns)} records unclassified.")
+    # Audit logic
+    unknown_count = len(filtered[filtered['complexity_tier'] == 'Unknown'])
+    if unknown_count > 0:
+        st.info(f"**Data Note:** {unknown_count:,} permits are 'Unknown'. See audit below.")
     else:
-        st.success("Full signal achieved.")
+        st.success("100% Signal Integrity.")
 
+# --- DATA QUALITY AUDIT ---
+unknowns = filtered[filtered['complexity_tier'] == 'Unknown']
 if not unknowns.empty:
     st.markdown("---")
     st.subheader("🕵️ Data Quality Audit: Unclassified Records")
