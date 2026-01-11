@@ -13,6 +13,7 @@ from service_models import PermitRecord, ComplexityTier, ProjectCategory
 from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
+from ingest_la import get_la_data
 
 load_dotenv()
 
@@ -230,5 +231,6 @@ if __name__ == "__main__":
     
     # Fort Worth uses ArcGIS
     sync_city("Fort Worth", get_fort_worth_data) 
+    sync_city("Los Angeles", get_la_data) # <--- LA is now part of the factory
     
     print("🏁 All syncs complete.")

@@ -3,9 +3,8 @@ import json
 import time
 from supabase import create_client, Client
 from dotenv import load_dotenv
-import google.genai as genai
+from google import genai 
 from google.genai import types
-from service_models import PermitRecord, ComplexityTier, ProjectCategory
 
 load_dotenv()
 
@@ -18,39 +17,18 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_KEY)
 
 def batch_classify_backlog(records):
-    """
-    Standalone AI Classifier for Backfilling.
-    """
-    print(f"🛰️ Processing Batch of {len(records)}...")
+    if not records: return []
+    
+    # NEW: Capture BOTH permit_id AND city to satisfy Postgres constraints
+    temp_map = {i: {"id": r['permit_id'], "city": r['city']} for i, r in enumerate(records)}
     
     batch_prompt = """
-    You are a Permit Classification Engine. 
-    Classify these permits into a 'tier' (Strategic, Commodity) and 'category'.
-    
-    CRITICAL NEGATIVE CONSTRAINTS:
-    1. IF description has 'office', 'studio', or 'shed' BUT is in a residential context (backyard, house, garage), CLASSIFY AS COMMODITY / RESIDENTIAL_ALTERATION.
-    2. 'Strategic' is ONLY for: New Commercial Buildings, Retail (Starbucks, etc), Multifamily (>4 units), Industrial.
-    3. 'Commodity' includes: All single-family residential (even extensive remodels), Signs, Pools.
-
-    Return valid JSON list of objects: {id, tier, category, reason}
-    
-    Valid Categories: 
-    - Residential - New Construction
-    - Residential - Alteration/Addition
-    - Commercial - New Construction
-    - Commercial - Tenant Improvement
-    - Infrastructure/Public Works
-    
-    INPUT DATA:
+    Classify these permits into {id, tier, category, reason}.
+    Tiers: 'Strategic' or 'Commodity'.
     """
-    
-    # Create a mapping to find the real database ID later
-    temp_map = {i: r['permit_id'] for i, r in enumerate(records)}
-    
     for idx, r in enumerate(records):
-        desc = r.get('description', 'No Description')[:200].replace("\n", " ")
-        val = r.get('valuation', 0)
-        batch_prompt += f"ID {idx}: Val=${val} | Desc: {desc}\n"
+        desc = r.get('description', 'No Description')[:200]
+        batch_prompt += f"ID {idx}: Val=${r.get('valuation')} | Desc: {desc}\n"
 
     try:
         response = ai_client.models.generate_content(
@@ -59,78 +37,55 @@ def batch_classify_backlog(records):
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
         
-        results = json.loads(response.text)
-        data_list = results.get("results") if isinstance(results, dict) else results
+        raw_text = response.text.strip()
+        if "```json" in raw_text:
+            raw_text = raw_text.split("```json")[-1].split("```")[0].strip()
+            
+        data_list = json.loads(raw_text)
+        if isinstance(data_list, dict): data_list = data_list.get("results", [])
         
         updates = []
         for res in data_list:
             try:
                 idx = int(res.get("id"))
                 if idx in temp_map:
-                    permit_id = temp_map[idx]
-                    
-                    # Normalization Logic
-                    raw_tier = str(res.get("tier", "Commodity")).upper()
-                    tier = "Strategic" if "STRATEGIC" in raw_tier else "Commodity"
-                    
-                    cat = res.get("category", "Residential - Alteration/Addition")
-                    reason = res.get("reason", "Backfill AI")
-                    
                     updates.append({
-                        "permit_id": permit_id,
-                        "complexity_tier": tier,
-                        "project_category": cat,
-                        "ai_rationale": reason
+                        "permit_id": temp_map[idx]["id"], # The Unique Key
+                        "city": temp_map[idx]["city"],   # SATISFIES NOT-NULL CONSTRAINT
+                        "complexity_tier": "Strategic" if "STRATEGIC" in str(res.get("tier")).upper() else "Commodity",
+                        "project_category": res.get("category"),
+                        "ai_rationale": res.get("reason", "Manual Backfill Cleanup")
                     })
-            except:
-                continue
-                
+            except: continue
         return updates
-
     except Exception as e:
         print(f"⚠️ AI Error: {e}")
         return []
 
-def run_backfill():
-    print("🚀 Starting AI Backfill Operation...")
-    
-    # 1. Fetch Unclassified Records
-    # We look for records where project_category is NULL
-    print("🔍 Scanning for unclassified records...")
-    response = supabase.table('permits').select("*").is_("project_category", "null").limit(500).execute()
+def run_cleanup():
+    # Targets records where the category is missing
+    print("🔍 Searching for records needing classification...")
+    response = supabase.table('permits').select("*").is_("project_category", "null").limit(100).execute()
     records = response.data
     
     if not records:
-        print("✅ No unclassified records found! The database is clean.")
-        return
+        print("✅ All clear! No backlog found.")
+        return False
 
-    print(f"Found {len(records)} records pending classification.")
-    
-    # 2. Process in Batches
-    batch_size = 20
-    for i in range(0, len(records), batch_size):
-        chunk = records[i:i + batch_size]
-        
-        # Run AI
+    all_updates = []
+    for i in range(0, len(records), 20):
+        chunk = records[i:i+20]
         updates = batch_classify_backlog(chunk)
-        
-        # Save to DB
-        if updates:
-            print(f"💾 Saving {len(updates)} updates to Supabase...")
-            for update in updates:
-                # We have to update one by one or use a more complex upsert. 
-                # For safety/simplicity in this script, we update one by one.
-                supabase.table('permits').update({
-                    "complexity_tier": update['complexity_tier'],
-                    "project_category": update['project_category'],
-                    "ai_rationale": update['ai_rationale']
-                }).eq("permit_id", update['permit_id']).execute()
-        
-        # Rate Limit Safety
+        if updates: all_updates.extend(updates)
         time.sleep(1)
 
+    if all_updates:
+        print(f"💾 Bulk updating {len(all_updates)} records...")
+        supabase.table('permits').upsert(all_updates, on_conflict='permit_id').execute()
+    return True
+
 if __name__ == "__main__":
-    # Loop to process multiple chunks if needed
-    for _ in range(5): # Run 5 cycles of 500 records (2500 total) per execution
-        run_backfill()
-        time.sleep(2)
+    # We run 10 cycles to clear the 1,000 LA records
+    for i in range(10):
+        print(f"--- Cycle {i+1} ---")
+        if not run_cleanup(): break
