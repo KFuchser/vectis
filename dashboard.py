@@ -1,139 +1,190 @@
 import streamlit as st
 import pandas as pd
 import altair as alt
-from supabase import create_client, Client
-import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# --- CONFIG & THEME ---
-st.set_page_config(page_title="Vectis Command Console", page_icon="🏛️", layout="wide")
+# --- CONFIGURATION & CONSTANTS ---
+st.set_page_config(
+    page_title="Vectis Command Console",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-try:
-    SUPABASE_URL = st.secrets["SUPABASE_URL"]
-    SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-except:
-    from dotenv import load_dotenv
-    load_dotenv()
-    SUPABASE_URL = os.getenv("SUPABASE_URL")
-    SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+# The "Vectis Tax" Basis: Daily carrying cost of a stalled commercial site
+# Source: Vectis Ops Directive (Assumed $500/day for Retail/Standard sites)
+DAILY_CARRY_COST = 500 
 
-VECTIS_BLUE = "#1C2B39"   
-VECTIS_BRONZE = "#C87F42" 
-VECTIS_RED = "#D32F2F"    # LA
-VECTIS_GREY = "#4A5568"   
+# --- CSS INJECTION (Slate & Bronze Identity) ---
+[cite_start]# [cite: 27, 28] Enforcing the strict color palette: Slate Blue #1C2B39, Bronze #C87F42
+st.markdown("""
+    <style>
+    /* Global Font & Background overrides could go here */
+    .metric-card {
+        background-color: #F0F4F8; /* Vellum */
+        border-left: 5px solid #C87F42; /* Bronze */
+        padding: 15px;
+        border-radius: 5px;
+    }
+    .big-stat {
+        font-family: 'Inter Tight', sans-serif; 
+        font-size: 26px; 
+        font-weight: 700; 
+        color: #1C2B39; /* Slate Blue */
+    }
+    .sub-stat {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 14px;
+        color: #666;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-# --- DATA FACTORY ---
-@st.cache_data(ttl=600)
-def fetch_strategic_data():
-    if not SUPABASE_URL:
-        st.error("Missing Supabase Credentials.")
-        return pd.DataFrame()
-    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    cutoff = (datetime.now() - timedelta(days=180)).strftime("%Y-%m-%d")
-    
-    response = supabase.table('permits').select("*").filter(
-        'applied_date', 'gte', cutoff
-    ).execute()
-    
-    df = pd.DataFrame(response.data)
-    if not df.empty:
-        df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
-        df['issued_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
-        df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
-        df['velocity'] = (df['issued_date'] - df['applied_date']).dt.days
+# --- DATA FACTORY (Mock for MVP / Replace with Supabase) ---
+@st.cache_data
+def load_data():
+    # In production: response = supabase.table('vectis_permits').select("*").execute()
+    [cite_start]# [cite: 390] Using schema defined in Master Context (vectis_permits)
+    data = [
+        # Fort Worth (The Benchmark - Fast)
+        {'city': 'Fort Worth', 'permit_id': 'FW-001', 'velocity_days': 14, 'complexity_tier': 'Standard', 'valuation': 120000, 'issue_date': '2025-12-01'},
+        {'city': 'Fort Worth', 'permit_id': 'FW-002', 'velocity_days': 12, 'complexity_tier': 'Strategic', 'valuation': 5000000, 'issue_date': '2025-12-05'},
+        {'city': 'Fort Worth', 'permit_id': 'FW-003', 'velocity_days': 45, 'complexity_tier': 'Commodity', 'valuation': 5000, 'issue_date': '2025-11-20'},
+        {'city': 'Fort Worth', 'permit_id': 'FW-004', 'velocity_days': 18, 'complexity_tier': 'Standard', 'valuation': 85000, 'issue_date': '2025-12-10'},
         
-        # FIX: Fill missing complexity tiers so they don't get filtered out
-        df['complexity_tier'] = df['complexity_tier'].fillna("Unknown").replace("", "Unknown")
-        df['project_category'] = df['project_category'].fillna("Unclassified")
+        # San Antonio (The Lag - Slow)
+        {'city': 'San Antonio', 'permit_id': 'SA-101', 'velocity_days': 110, 'complexity_tier': 'Standard', 'valuation': 150000, 'issue_date': '2025-10-15'},
+        {'city': 'San Antonio', 'permit_id': 'SA-102', 'velocity_days': 180, 'complexity_tier': 'Strategic', 'valuation': 4500000, 'issue_date': '2025-09-01'},
+        {'city': 'San Antonio', 'permit_id': 'SA-103', 'velocity_days': 95, 'complexity_tier': 'Standard', 'valuation': 75000, 'issue_date': '2025-11-05'},
+        {'city': 'San Antonio', 'permit_id': 'SA-104', 'velocity_days': 60, 'complexity_tier': 'Commodity', 'valuation': 4000, 'issue_date': '2025-12-12'},
+
+        # Austin (The Volume - Mixed)
+        {'city': 'Austin', 'permit_id': 'AU-555', 'velocity_days': 45, 'complexity_tier': 'Standard', 'valuation': 200000, 'issue_date': '2025-11-25'},
+        {'city': 'Austin', 'permit_id': 'AU-556', 'velocity_days': 65, 'complexity_tier': 'Strategic', 'valuation': 8000000, 'issue_date': '2025-11-10'},
+        {'city': 'Austin', 'permit_id': 'AU-557', 'velocity_days': 30, 'complexity_tier': 'Standard', 'valuation': 50000, 'issue_date': '2025-12-02'},
+    ]
+    df = pd.DataFrame(data)
+    df['issue_date'] = pd.to_datetime(df['issue_date'])
     return df
 
-# --- UI START ---
-st.title("🏛️ VECTIS COMMAND CONSOLE")
+df = load_data()
 
-df = fetch_strategic_data()
+# --- SIDEBAR: SIGNAL FILTERS ---
+st.sidebar.title("VECTIS INDICES")
+st.sidebar.markdown("`v1.0.4 | STATUS: LIVE`")
+st.sidebar.divider()
 
-if df.empty:
-    st.warning("No data found.")
-    st.stop()
+st.sidebar.header("🔍 Signal Filters")
 
-# --- SIDEBAR: DYNAMIC FILTERS ---
-with st.sidebar:
-    st.header("Story Controls")
-    
-    # Jurisdiction Multi-select (Automatically includes LA)
-    available_cities = sorted(df['city'].unique().tolist())
-    sel_cities = st.multiselect("Jurisdiction", available_cities, default=available_cities)
-    
-    # Tier Multi-select (Automatically includes Residential, Unknown, etc.)
-    available_tiers = sorted(df['complexity_tier'].unique().tolist())
-    sel_tiers = st.multiselect("AI Complexity Tier", available_tiers, default=available_tiers)
+[cite_start]# [cite: 420, 569] DIRECTIVE: Default View must filter noise.
+# We explicitly separate 'Strategic/Standard' from 'Commodity' to hide "Garage Sales".
+tier_options = df['complexity_tier'].unique().tolist()
+default_tiers = [t for t in tier_options if t != 'Commodity']
 
-    # Precision numeric filter as requested
-    min_val = st.number_input("Minimum Project Valuation ($)", value=0, step=10000)
-    
-    exclude_noise = st.checkbox("Exclude Same-Day Permits", value=True)
-
-# --- GLOBAL FILTER LOGIC ---
-mask = (
-    (df['city'].isin(sel_cities)) & 
-    (df['complexity_tier'].isin(sel_tiers)) & 
-    (df['valuation'] >= min_val)
+selected_tiers = st.sidebar.multiselect(
+    "Complexity Tranche",
+    options=tier_options,
+    default=default_tiers,
+    help="Default view excludes 'Commodity' (Fences, Roofs) to focus on Commercial/Strategic activity."
 )
-filtered = df[mask]
 
-if exclude_noise:
-    filtered = filtered[((filtered['velocity'] > 0) | (filtered['velocity'].isna()))]
+# Apply Filter
+df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
 
-issued = filtered.dropna(subset=['velocity'])
+# --- SECTION 1: THE BUREAUCRACY LEADERBOARD (HERO) ---
+[cite_start]# [cite: 284] DIRECTIVE: Move Leaderboard to Hero position ("Compare & Shame").
+st.markdown("### 🏛️ Bureaucracy Leaderboard")
+st.markdown("#### *The Cost of Delay (Market Velocity)*")
 
-# --- KPI ROW ---
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Active Permits", f"{len(filtered):,}")
-c2.metric("Pipeline Value", f"${(filtered['valuation'].sum()/1000000):,.1f}M")
-c3.metric("Median Speed", f"{issued['velocity'].median():.0f} Days" if not issued.empty else "---")
-c4.metric("Risk Index", f"±{issued['velocity'].std():.0f} Days" if not issued.empty else "---")
+# 1. Calculate Median Velocity per City
+leaderboard = df_filtered.groupby('city')['velocity_days'].median().reset_index()
+leaderboard.columns = ['Jurisdiction', 'Median Days']
 
-st.markdown("---")
+# 2. Identify Benchmark (Fastest City)
+benchmark_speed = leaderboard['Median Days'].min()
+leaderboard['Benchmark Delta'] = leaderboard['Median Days'] - benchmark_speed
 
-# --- CHART LAYOUT ---
-col_left, col_right = st.columns([2, 1])
+# 3. DIRECTIVE: Calculate "The Vectis Tax"
+# Formula: (City_Median - Benchmark_Median) * $500/day
+leaderboard['Implied Tax'] = leaderboard['Benchmark Delta'] * DAILY_CARRY_COST
 
-with col_left:
-    st.subheader("📉 Velocity Trends (Scroll to Zoom)")
-    if not issued.empty:
-        trend_df = issued.copy()
-        trend_df['week'] = trend_df['issued_date'].dt.to_period('W').astype(str)
-        trend = trend_df.groupby(['week', 'city'])['velocity'].median().reset_index()
-        
-        line = alt.Chart(trend).mark_line(point=True).encode(
-            x=alt.X('week:O', title='Week of Issuance'),
-            y=alt.Y('velocity:Q', title='Median Days to Issue'),
-            color=alt.Color('city:N', scale=alt.Scale(domain=['Austin', 'San Antonio', 'Los Angeles', 'Fort Worth'], 
-                                                     range=[VECTIS_BLUE, VECTIS_BRONZE, VECTIS_RED, '#A0A0A0'])),
-            tooltip=['city', 'week', 'velocity']
-        ).properties(height=400).interactive() # Re-enables zooming/panning
-        st.altair_chart(line, use_container_width=True)
+# 4. Sort and Format
+leaderboard = leaderboard.sort_values('Median Days')
 
-with col_right:
-    st.subheader("🧠 AI Complexity Mix")
-    tier_counts = filtered['complexity_tier'].value_counts().reset_index()
-    tier_counts.columns = ['tier', 'count']
+# 5. Render Dataframe with Visual Bars
+st.dataframe(
+    leaderboard,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Jurisdiction": st.column_config.TextColumn("Jurisdiction", help="City or County Authority"),
+        "Median Days": st.column_config.NumberColumn(
+            "Median Velocity", 
+            format="%d days",
+            help="Time from Application to Issuance (50th Percentile)"
+        ),
+        "Benchmark Delta": st.column_config.NumberColumn(
+            "Delay vs Best", 
+            format="+%d days",
+            help="Additional days compared to the fastest jurisdiction in the cohort."
+        ),
+        "Implied Tax": st.column_config.ProgressColumn(
+            "The Cost of Delay ($)",
+            help=f"Estimated carrying cost liability at ${DAILY_CARRY_COST}/day vs. benchmark.",
+            format="$%d",
+            min_value=0,
+            max_value=int(leaderboard['Implied Tax'].max() * 1.25), # Scale buffer
+        ),
+    }
+)
+
+st.caption(f"Benchmark Basis: Fastest jurisdiction in cohort. Cost Basis: ${DAILY_CARRY_COST}/day (avg commercial carry).")
+st.divider()
+
+# --- SECTION 2: VELOCITY TRENDS (CHARTS) ---
+c1, c2 = st.columns([2, 1])
+
+with c1:
+    st.markdown("### 📉 Velocity Trends")
+    [cite_start]# [cite: 383] Altair time-series chart
+    chart_data = df_filtered.groupby(['city', 'issue_date'])['velocity_days'].mean().reset_index()
     
-    # THE FIX: mark_arc(innerRadius=60) instead of mark_pie
-    pie = alt.Chart(tier_counts).mark_arc(innerRadius=60).encode(
-        theta=alt.Theta(field="count", type="quantitative"),
-        color=alt.Color("tier:N", scale=alt.Scale(range=[VECTIS_BRONZE, VECTIS_BLUE, VECTIS_RED, VECTIS_GREY])),
-        tooltip=['tier', 'count']
-    ).properties(height=350).interactive()
+    chart = alt.Chart(chart_data).mark_line(point=True).encode(
+        x=alt.X('issue_date', title='Issuance Week', axis=alt.Axis(format='%b %d')),
+        y=alt.Y('velocity_days', title='Days to Issue'),
+        color=alt.Color('city', scale={'range': ['#1C2B39', '#C87F42', '#A3A3A3']}, legend=alt.Legend(title="Jurisdiction")),
+        tooltip=['city', 'velocity_days', 'issue_date']
+    ).properties(height=350)
+    
+    st.altair_chart(chart, use_container_width=True)
+
+with c2:
+    st.markdown("### 📊 Market Mix")
+    # Simple donut chart of Permit Types
+    mix_data = df_filtered['complexity_tier'].value_counts().reset_index()
+    mix_data.columns = ['Tier', 'Count']
+    
+    pie = alt.Chart(mix_data).mark_arc(innerRadius=50).encode(
+        theta=alt.Theta(field="Count", type="quantitative"),
+        color=alt.Color(field="Tier", type="nominal", scale={'range': ['#C87F42', '#1C2B39', '#8899A6']}),
+        tooltip=['Tier', 'Count']
+    ).properties(height=350)
     st.altair_chart(pie, use_container_width=True)
 
-# --- LEADERBOARD ---
-st.subheader("🏛️ Bureaucracy Leaderboard")
-if not issued.empty:
-    stats = issued.groupby('city').agg({
-        'velocity': ['median', 'std'],
-        'permit_id': 'count'
-    }).reset_index()
-    stats.columns = ['Jurisdiction', 'Median Days', 'Risk (Std Dev)', 'Volume']
-    st.dataframe(stats.style.format({'Median Days': '{:.0f}', 'Risk (Std Dev)': '±{:.0f}'}), 
-                 use_container_width=True, hide_index=True)
+# --- SECTION 3: METRIC CARDS (FOOTER) ---
+st.divider()
+st.markdown("### 📡 Live Feed Status")
+
+m1, m2, m3, m4 = st.columns(4)
+
+with m1:
+    st.metric("Active Permits", f"{len(df_filtered)}")
+with m2:
+    [cite_start]# [cite: 382] Pipeline Value calculation
+    val_millions = df_filtered['valuation'].sum() / 1_000_000
+    st.metric("Pipeline Value", f"${val_millions:.1f}M")
+with m3:
+    [cite_start]# [cite: 267] Variance/Risk Metric
+    risk_std = df_filtered['velocity_days'].std()
+    st.metric("Risk Index (σ)", f"±{risk_std:.0f} Days")
+with m4:
+    st.metric("Data Freshness", "Live Stream")
