@@ -140,3 +140,50 @@ st.dataframe(
             help="Median Processing Days (Source: DB)"
         ),
         "volume": st.column_config.NumberColumn("Volume (n)"),
+        "delay": st.column_config.NumberColumn(
+            "Delay vs Best", 
+            format="+%d days"
+        ),
+        "tax": st.column_config.ProgressColumn(
+            "Cost of Delay ($)",
+            format="$%d",
+            min_value=0,
+            max_value=int(leaderboard['tax'].max() * 1.1) if leaderboard['tax'].max() > 0 else 1000,
+            help=f"Implied liability at ${DAILY_CARRY_COST}/day"
+        ),
+    }
+)
+
+st.divider()
+
+# --- SECTION 2: VELOCITY MATRIX ---
+st.markdown("### 🧩 Velocity Matrix")
+st.caption("Median Days to Issue by City & Class")
+
+matrix = df_filtered.groupby(['city', 'complexity_tier'])['velocity'].median().reset_index()
+
+heatmap = alt.Chart(matrix).mark_rect().encode(
+    x=alt.X('complexity_tier', title='Permit Class'),
+    y=alt.Y('city', title='Jurisdiction'),
+    color=alt.Color('velocity', title='Days', scale={'scheme': 'orangered'}),
+    tooltip=['city', 'complexity_tier', 'velocity']
+).properties(height=350)
+
+text = heatmap.mark_text().encode(
+    text=alt.Text('velocity', format='.0f'),
+    color=alt.value('black')
+)
+
+st.altair_chart(heatmap + text, use_container_width=True)
+
+# --- SECTION 3: METRICS ---
+st.divider()
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    st.metric("Total Active Permits", f"{len(df_filtered)}")
+with c2:
+    val_millions = df_filtered['valuation'].sum() / 1_000_000
+    st.metric("Pipeline Value", f"${val_millions:.1f}M")
+with c3:
+    st.metric("Data Source", "Live Supabase Feed")
