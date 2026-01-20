@@ -3,19 +3,10 @@ import pandas as pd
 import altair as alt
 from supabase import create_client, Client
 
-# --- CONFIGURATION ---
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
-DAILY_CARRY_COST = 500 
+st.markdown("""<style>.metric-card { background-color: #F0F4F8; border-left: 5px solid #C87F42; padding: 15px; }</style>""", unsafe_allow_html=True)
 
-# --- STYLING ---
-st.markdown("""
-    <style>
-    .metric-card { background-color: #F0F4F8; border-left: 5px solid #C87F42; padding: 15px; }
-    h1, h2, h3 { color: #1C2B39; font-family: 'Inter', sans-serif; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- STRICT DATA LOADER (Schema Aligned) ---
+# --- PERMISSIVE DATA LOADER ---
 @st.cache_data(ttl=600)
 def load_data():
     try:
@@ -23,169 +14,103 @@ def load_data():
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # 1. Fetch Data
+        # 1. Fetch ALL Data
         response = supabase.table('permits').select("*").execute()
         if not response.data: return pd.DataFrame()
         df = pd.DataFrame(response.data)
 
-        # 2. SCHEMA ALIGNMENT
-        if 'issued_date' in df.columns:
-            df = df.rename(columns={'issued_date': 'issue_date'})
-            
-        # 3. TYPE CONVERSION
-        if 'issue_date' in df.columns:
-            df['issue_date'] = pd.to_datetime(df['issue_date'], errors='coerce')
-        if 'applied_date' in df.columns:
-            df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
+        # 2. Rename & Type Convert (Best Effort)
+        if 'issued_date' in df.columns: df = df.rename(columns={'issued_date': 'issue_date'})
+        
+        if 'issue_date' in df.columns: df['issue_date'] = pd.to_datetime(df['issue_date'], errors='coerce')
+        if 'applied_date' in df.columns: df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
 
-        # 4. VELOCITY LOGIC
+        # 3. Velocity (Keep NaNs!)
         if 'processing_days' in df.columns:
             df['velocity'] = pd.to_numeric(df['processing_days'], errors='coerce')
         else:
             df['velocity'] = None
 
-        # Fallback Calculation
-        if 'issue_date' in df.columns and 'applied_date' in df.columns:
-            mask_calc = df['velocity'].isna() & df['issue_date'].notna() & df['applied_date'].notna()
-            df.loc[mask_calc, 'velocity'] = (df.loc[mask_calc, 'issue_date'] - df.loc[mask_calc, 'applied_date']).dt.days
+        # Fallback calc (only if missing)
+        mask = df['velocity'].isna() & df['issue_date'].notna() & df['applied_date'].notna()
+        df.loc[mask, 'velocity'] = (df.loc[mask, 'issue_date'] - df.loc[mask, 'applied_date']).dt.days
 
-        # 5. STRICT FILTERING
-        df = df.dropna(subset=['velocity'])
-        df = df[df['velocity'] > 0] # Exclude OTC/Instant
-        df = df[(df['velocity'] >= 0) & (df['velocity'] < 3650)]
-
-        # 6. Metadata Cleanup
-        if 'complexity_tier' not in df.columns: 
-            df['complexity_tier'] = 'Unknown'
+        # 4. CRITICAL CHANGE: DO NOT DROP ROWS
+        # We keep everything. If velocity is missing/negative, we just flag it.
+        # This ensures "Standard" shows up in filters even if dates are bad.
+        
+        # Cleanup Metadata
+        if 'complexity_tier' not in df.columns: df['complexity_tier'] = 'Unknown'
         df['complexity_tier'] = df['complexity_tier'].fillna('Unknown')
         
-        # Valuation Normalization
-        val_cols = ['valuation', 'job_value', 'est_project_cost', 'jobvalue']
-        found_val = False
-        for c in val_cols:
-            if c in df.columns:
-                df['valuation'] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-                found_val = True
-                break
-        if not found_val: df['valuation'] = 0
+        if 'valuation' in df.columns:
+            df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
+        else:
+            df['valuation'] = 0
 
         return df
 
     except Exception as e:
-        st.error(f"Data Pipeline Error: {e}")
+        st.error(f"Data Error: {e}")
         return pd.DataFrame()
 
 df = load_data()
 
 # --- SIDEBAR ---
 st.sidebar.title("VECTIS INDICES")
-st.sidebar.caption("v4.1 | VISUAL RESTORE")
+st.sidebar.caption("v5.0 | MODE: SHOW ALL DATA")
 
 if df.empty:
-    st.warning("No valid data found. Check Database.")
+    st.error("Database returned 0 records.")
     st.stop()
 
-# Filter: Tiers
+# Filter: Show everything found in the DB
 all_tiers = sorted(df['complexity_tier'].unique().tolist())
-default_tiers = [t for t in all_tiers if t != 'Commodity']
-if not default_tiers: default_tiers = all_tiers
+selected_tiers = st.sidebar.multiselect("Permit Class", all_tiers, default=all_tiers)
 
-selected_tiers = st.sidebar.multiselect("Permit Class", all_tiers, default=default_tiers)
-df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
+# Filter: Data Quality Toggle
+show_bad_data = st.sidebar.checkbox("Show Records with Missing Dates?", value=True)
 
-if df_filtered.empty:
-    st.info("No records match filters.")
-    st.stop()
+if show_bad_data:
+    df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
+else:
+    # Only filter out bad data if user asks
+    df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
+    df_filtered = df_filtered.dropna(subset=['velocity'])
+    df_filtered = df_filtered[df_filtered['velocity'] > 0]
 
-# --- HERO: LEADERBOARD ---
-st.markdown("### 🏛️ Bureaucracy Leaderboard")
-st.markdown("_Median Days to Issue (Excluding OTC/Instant)_")
+# --- CHARTS ---
+st.markdown("### 📉 Velocity Trends")
 
-leaderboard = df_filtered.groupby('city').agg(
-    median_days=('velocity', 'median'),
-    volume=('velocity', 'count'),
-    total_value=('valuation', 'sum')
-).reset_index().sort_values('median_days')
-
-benchmark = leaderboard['median_days'].min()
-leaderboard['delay'] = leaderboard['median_days'] - benchmark
-leaderboard['tax'] = leaderboard['delay'] * DAILY_CARRY_COST
-
-st.dataframe(
-    leaderboard,
-    use_container_width=True,
-    hide_index=True,
-    column_config={
-        "city": "Jurisdiction",
-        "median_days": st.column_config.NumberColumn("Median Velocity", format="%d days"),
-        "volume": "Volume (n)",
-        "delay": st.column_config.NumberColumn("Delay vs Best", format="+%d days"),
-        "tax": st.column_config.ProgressColumn("Cost of Delay ($)", format="$%d", min_value=0, max_value=int(leaderboard['tax'].max()*1.1) if leaderboard['tax'].max() > 0 else 1000),
-    }
-)
-
-st.divider()
-
-# --- SECTION 2: CHARTS (RESTORED) ---
-c1, c2 = st.columns([2, 1])
-
-with c1:
-    st.markdown("### 📉 Velocity Trends")
-    # Prepare Time Series Data
-    if 'issue_date' in df_filtered.columns:
-        chart_data = df_filtered.copy()
-        chart_data = chart_data.dropna(subset=['issue_date'])
+if 'issue_date' in df_filtered.columns:
+    # We drop NaNs ONLY for the chart, not the whole dashboard
+    chart_df = df_filtered.dropna(subset=['issue_date', 'velocity'])
+    chart_df = chart_df[chart_df['velocity'] > 0] # Remove 0-day noise from chart
+    
+    if not chart_df.empty:
+        chart_df['month'] = chart_df['issue_date'].dt.to_period('M').apply(lambda r: r.start_time)
+        trend = chart_df.groupby(['city', 'month'])['velocity'].median().reset_index()
         
-        # Aggregate by Month for cleaner lines
-        chart_data['issue_month'] = chart_data['issue_date'].dt.to_period('M').apply(lambda r: r.start_time)
-        
-        trend = chart_data.groupby(['city', 'issue_month'])['velocity'].median().reset_index()
-        
-        line_chart = alt.Chart(trend).mark_line(point=True).encode(
-            x=alt.X('issue_month', title='Month', axis=alt.Axis(format='%b %Y')),
-            y=alt.Y('velocity', title='Median Days to Issue'),
-            color=alt.Color('city', legend=alt.Legend(title="Jurisdiction")),
-            tooltip=['city', 'issue_month', 'velocity']
-        ).properties(height=350).interactive()
-        
-        st.altair_chart(line_chart, use_container_width=True)
+        line = alt.Chart(trend).mark_line(point=True).encode(
+            x=alt.X('month', format='%b %Y'),
+            y='velocity',
+            color='city',
+            tooltip=['city', 'month', 'velocity']
+        ).interactive()
+        st.altair_chart(line, use_container_width=True)
     else:
-        st.info("Trend chart unavailable (Missing Issue Date)")
+        st.warning("Filters active, but no records have valid Dates + Velocity to plot.")
 
-with c2:
-    st.markdown("### 📊 Market Mix")
-    mix = df_filtered['complexity_tier'].value_counts().reset_index()
-    mix.columns = ['Tier', 'Count']
-    
-    donut = alt.Chart(mix).mark_arc(innerRadius=50).encode(
-        theta=alt.Theta(field="Count", type="quantitative"),
-        color=alt.Color(field="Tier", type="nominal", scale={'scheme': 'tableau10'}),
-        tooltip=['Tier', 'Count']
-    ).properties(height=350)
-    
-    st.altair_chart(donut, use_container_width=True)
-
-# --- SECTION 3: MATRIX ---
-st.divider()
-st.markdown("### 🧩 Velocity Matrix (Detailed Breakdown)")
-matrix = df_filtered.groupby(['city', 'complexity_tier'])['velocity'].median().reset_index()
-
-heatmap = alt.Chart(matrix).mark_rect().encode(
-    x='complexity_tier',
-    y='city',
-    color=alt.Color('velocity', scale={'scheme': 'orangered'}),
-    tooltip=['city', 'complexity_tier', 'velocity']
-).properties(height=300)
-
-text = heatmap.mark_text().encode(
-    text=alt.Text('velocity', format='.0f'),
-    color=alt.value('black')
+# --- DATA TABLE (Proof) ---
+st.markdown("### 📋 Data Inspection")
+st.dataframe(
+    df_filtered[['city', 'complexity_tier', 'issue_date', 'velocity']].sort_values('issue_date', ascending=False).head(50),
+    use_container_width=True
 )
-st.altair_chart(heatmap + text, use_container_width=True)
 
 # --- FOOTER ---
 st.divider()
-m1, m2, m3 = st.columns(3)
-with m1: st.metric("Active Permits", f"{len(df_filtered)}")
-with m2: st.metric("Pipeline Value", f"${df_filtered['valuation'].sum()/1_000_000:.1f}M")
-with m3: st.metric("Data Source", "Live Supabase Feed")
+c1, c2, c3 = st.columns(3)
+with c1: st.metric("Total Records", len(df_filtered))
+with c2: st.metric("Records with Velocity", len(df_filtered.dropna(subset=['velocity'])))
+with c3: st.metric("Missing/Bad Data", len(df_filtered) - len(df_filtered.dropna(subset=['velocity'])))
