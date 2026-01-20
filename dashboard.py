@@ -33,13 +33,15 @@ st.markdown("""
 
 # --- DATA FACTORY ---
 @st.cache_data
+# --- DATA FACTORY (Mock for MVP / Replace with Supabase) ---
+@st.cache_data
 def load_data():
-    # Mock data for MVP stability
+    # In production: response = supabase.table('vectis_permits').select("*").execute()
     data = [
+        # --- 2025 BASELINE ---
         {'city': 'Fort Worth', 'permit_id': 'FW-001', 'velocity_days': 14, 'complexity_tier': 'Standard', 'valuation': 120000, 'issue_date': '2025-12-01'},
         {'city': 'Fort Worth', 'permit_id': 'FW-002', 'velocity_days': 12, 'complexity_tier': 'Strategic', 'valuation': 5000000, 'issue_date': '2025-12-05'},
         {'city': 'Fort Worth', 'permit_id': 'FW-003', 'velocity_days': 45, 'complexity_tier': 'Commodity', 'valuation': 5000, 'issue_date': '2025-11-20'},
-        {'city': 'Fort Worth', 'permit_id': 'FW-004', 'velocity_days': 18, 'complexity_tier': 'Standard', 'valuation': 85000, 'issue_date': '2025-12-10'},
         
         {'city': 'San Antonio', 'permit_id': 'SA-101', 'velocity_days': 110, 'complexity_tier': 'Standard', 'valuation': 150000, 'issue_date': '2025-10-15'},
         {'city': 'San Antonio', 'permit_id': 'SA-102', 'velocity_days': 180, 'complexity_tier': 'Strategic', 'valuation': 4500000, 'issue_date': '2025-09-01'},
@@ -49,6 +51,16 @@ def load_data():
         {'city': 'Austin', 'permit_id': 'AU-555', 'velocity_days': 45, 'complexity_tier': 'Standard', 'valuation': 200000, 'issue_date': '2025-11-25'},
         {'city': 'Austin', 'permit_id': 'AU-556', 'velocity_days': 65, 'complexity_tier': 'Strategic', 'valuation': 8000000, 'issue_date': '2025-11-10'},
         {'city': 'Austin', 'permit_id': 'AU-557', 'velocity_days': 30, 'complexity_tier': 'Standard', 'valuation': 50000, 'issue_date': '2025-12-02'},
+
+        # --- Q1 2026 INJECTION (NEW) ---
+        {'city': 'Fort Worth', 'permit_id': 'FW-005', 'velocity_days': 11, 'complexity_tier': 'Strategic', 'valuation': 3200000, 'issue_date': '2026-01-05'},
+        {'city': 'Fort Worth', 'permit_id': 'FW-006', 'velocity_days': 14, 'complexity_tier': 'Standard', 'valuation': 95000, 'issue_date': '2026-01-12'},
+        
+        {'city': 'San Antonio', 'permit_id': 'SA-105', 'velocity_days': 195, 'complexity_tier': 'Strategic', 'valuation': 6000000, 'issue_date': '2026-01-08'},
+        {'city': 'San Antonio', 'permit_id': 'SA-106', 'velocity_days': 115, 'complexity_tier': 'Standard', 'valuation': 120000, 'issue_date': '2026-01-15'},
+
+        {'city': 'Austin', 'permit_id': 'AU-558', 'velocity_days': 28, 'complexity_tier': 'Standard', 'valuation': 180000, 'issue_date': '2026-01-10'},
+        {'city': 'Austin', 'permit_id': 'AU-559', 'velocity_days': 55, 'complexity_tier': 'Strategic', 'valuation': 4500000, 'issue_date': '2026-01-18'},
     ]
     df = pd.DataFrame(data)
     df['issue_date'] = pd.to_datetime(df['issue_date'])
