@@ -17,10 +17,6 @@ DAILY_CARRY_COST = 500
 # --- CSS INJECTION (Slate & Bronze Identity) ---
 st.markdown("""
     <style>
-    /* Clean Dashboard Styling */
-    .stApp {
-        background-color: #ffffff;
-    }
     .metric-card {
         background-color: #F0F4F8; /* Vellum */
         border-left: 5px solid #C87F42; /* Bronze */
@@ -38,11 +34,12 @@ st.markdown("""
 @st.cache_data(ttl=600) # Cache for 10 mins
 def load_data():
     try:
+        # 1. Initialize Connection
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # 1. Fetch Data from the CORRECT table: 'permits'
+        # 2. Fetch Data (Table: 'permits')
         # We grab all columns to ensure we catch 'processing_days' and 'complexity_tier'
         response = supabase.table('permits').select("*").execute()
         
@@ -51,60 +48,78 @@ def load_data():
             
         df = pd.DataFrame(response.data)
 
-        # 2. Type Enforcement
-        # We handle 'issue_date' carefully to avoid crashes
-        df['issue_date'] = pd.to_datetime(df['issue_date'], errors='coerce')
-        
-        # 3. Velocity Logic (The "Null Fix")
-        # Your DB has a 'processing_days' column. We use that as the source of truth.
-        # If it's missing (NULL), ONLY then do we try to calculate it.
-        if 'processing_days' in df.columns:
-             df['velocity_days'] = df['processing_days']
+        # 3. SCHEMA NORMALIZER (The Fix)
+        # We map known potential variations to the dashboard's expected names
+        # This prevents crashes if 'job_value' is named 'valuation' or 'est_project_cost'
+        column_map = {
+            'status_date': 'issue_date',
+            'jobvalue': 'valuation',
+            'job_value': 'valuation',
+            'total_valuation': 'valuation',
+            'est_project_cost': 'valuation',
+            'jurisdiction': 'city'
+        }
+        df = df.rename(columns=column_map)
+
+        # 4. Type Enforcement & Velocity Logic
+        # Handle Date Conversion
+        if 'issue_date' in df.columns:
+            df['issue_date'] = pd.to_datetime(df['issue_date'], errors='coerce')
         else:
-             # Fallback calculation if column is missing completely
+            # Fallback for charting if issue_date is missing entirely
+            df['issue_date'] = pd.to_datetime(datetime.now())
+
+        # VELOCITY LOGIC: Prefer 'processing_days' column if it exists
+        if 'processing_days' in df.columns:
+             df['velocity_days'] = pd.to_numeric(df['processing_days'], errors='coerce')
+        else:
+             # Fallback calculation: Issue - Applied (if applied exists)
              if 'applied_date' in df.columns:
                 df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
                 df['velocity_days'] = (df['issue_date'] - df['applied_date']).dt.days
+             else:
+                df['velocity_days'] = 0 # Default if both missing
         
-        # Fill NaN velocity with 0 to prevent math errors in the Tax calculation
+        # Clean up NaNs in velocity to prevent math errors
         df['velocity_days'] = df['velocity_days'].fillna(0)
 
-        # 4. Data Sanitation
-        # Handle cases where 'valuation' or 'complexity_tier' might be named differently or missing
+        # 5. Data Sanitation
+        # Valuation
         if 'valuation' in df.columns:
-            df['valuation'] = df['valuation'].fillna(0)
+            df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
         else:
             df['valuation'] = 0 # Safety net
 
+        # Complexity Tier
         if 'complexity_tier' not in df.columns:
-            df['complexity_tier'] = 'Standard' # Default if column missing
+            df['complexity_tier'] = 'Standard' # Default fallback
         else:
             df['complexity_tier'] = df['complexity_tier'].fillna('Standard')
         
         return df
 
     except Exception as e:
-        st.error(f"Database Connection Error: {e}")
+        st.error(f"Data Pipeline Error: {e}")
         return pd.DataFrame()
 
 df = load_data()
 
 # --- SIDEBAR: SIGNAL FILTERS ---
 st.sidebar.title("VECTIS INDICES")
-st.sidebar.markdown("`v2.1.2 | LIVE FEED`")
+st.sidebar.markdown("`v2.1.4 | LIVE FEED`")
 st.sidebar.divider()
 
 if not df.empty:
     st.sidebar.header("🔍 Signal Filters")
 
     # DIRECTIVE: Default View filters out 'Commodity' noise
-    # We check if the column exists before filtering to prevent KeyErrors
     if 'complexity_tier' in df.columns:
         tier_options = df['complexity_tier'].unique().tolist()
-        # Default to excluding Commodity if possible
+        # Default to excluding Commodity
         default_tiers = [t for t in tier_options if t != 'Commodity']
-        if not default_tiers: # If only Commodity exists, show it
-             default_tiers = tier_options
+        # If dataset is ONLY commodity, show everything
+        if not default_tiers: 
+            default_tiers = tier_options
 
         selected_tiers = st.sidebar.multiselect(
             "Complexity Tranche",
@@ -115,7 +130,7 @@ if not df.empty:
         # Apply Filter
         df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
     else:
-        # If column missing, pass through all data
+        # Pass through if column missing
         df_filtered = df
 else:
     st.sidebar.warning("No data stream detected.")
@@ -128,8 +143,11 @@ if not df_filtered.empty:
     st.markdown("### 🏛️ Bureaucracy Leaderboard")
     st.markdown("#### *The Cost of Delay (Market Velocity)*")
 
+    # Grouping Logic (Safety check for 'city' column)
+    group_col = 'city' if 'city' in df_filtered.columns else df_filtered.columns[0]
+
     # 1. Calculate Median Velocity per City
-    leaderboard = df_filtered.groupby('city')['velocity_days'].median().reset_index()
+    leaderboard = df_filtered.groupby(group_col)['velocity_days'].median().reset_index()
     leaderboard.columns = ['Jurisdiction', 'Median Days']
 
     # 2. Identify Benchmark (Fastest City)
@@ -153,6 +171,7 @@ if not df_filtered.empty:
                 "Median Days": st.column_config.NumberColumn(
                     "Median Velocity", 
                     format="%d days",
+                    help="Time from Application to Issuance (50th Percentile)"
                 ),
                 "Benchmark Delta": st.column_config.NumberColumn(
                     "Delay vs Best", 
@@ -178,16 +197,18 @@ if not df_filtered.empty:
         # Altair time-series chart
         chart_data = df_filtered.copy()
         
-        if 'issue_date' in chart_data.columns and not chart_data['issue_date'].isnull().all():
+        if 'issue_date' in chart_data.columns:
+            # Aggregate by week to smooth lines
             chart_data['issue_week'] = chart_data['issue_date'].dt.to_period('W').apply(lambda r: r.start_time)
-            chart_agg = chart_data.groupby(['city', 'issue_week'])['velocity_days'].mean().reset_index()
+            chart_agg = chart_data.groupby([group_col, 'issue_week'])['velocity_days'].mean().reset_index()
             
             chart = alt.Chart(chart_agg).mark_line(point=True).encode(
                 x=alt.X('issue_week', title='Issuance Week', axis=alt.Axis(format='%b %d')),
                 y=alt.Y('velocity_days', title='Avg Days to Issue'),
-                color=alt.Color('city', scale={'range': ['#1C2B39', '#C87F42', '#A3A3A3']}, legend=alt.Legend(title="Jurisdiction")),
-                tooltip=['city', 'velocity_days', 'issue_week']
+                color=alt.Color(group_col, scale={'range': ['#1C2B39', '#C87F42', '#A3A3A3']}, legend=alt.Legend(title="Jurisdiction")),
+                tooltip=[group_col, 'velocity_days', 'issue_week']
             ).properties(height=350)
+            
             st.altair_chart(chart, use_container_width=True)
         else:
             st.info("Insufficient date data to render trends.")
@@ -226,4 +247,12 @@ if not df_filtered.empty:
         st.metric("Data Freshness", "Supabase Live")
 
 else:
-    st.info("Waiting for data... Ensure table 'permits' is populated.")
+    st.info("Waiting for data... Table 'permits' appears empty or connection failed.")
+    # Debugging helper (Optional - shows raw columns if load fails)
+    # try:
+    #     url = st.secrets["SUPABASE_URL"]
+    #     key = st.secrets["SUPABASE_KEY"]
+    #     sb = create_client(url, key)
+    #     raw = sb.table('permits').select("*").limit(1).execute()
+    #     st.write("Available Columns:", list(raw.data[0].keys()) if raw.data else "None")
+    # except: pass
