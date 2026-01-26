@@ -1,9 +1,9 @@
 """
-Vectis Ingestion Orchestrator - FINAL PRODUCTION
+Vectis Ingestion Orchestrator - PRODUCTION
 Fixes:
-1. Model: Reverts to 'gemini-2.0-flash' (Proven to connect).
-2. Logic: RESTORES the missing logic to save AI results to the database.
-3. Scope: Includes Los Angeles.
+1. Markdown Cleaning: Strips ```json tags so AI responses don't fail silently.
+2. Model: Gemini-2.0-Flash.
+3. Scope: Austin, SA, Fort Worth, LA.
 """
 import os
 import json
@@ -69,7 +69,7 @@ def process_and_classify_permits(records: List[PermitRecord]):
         else:
             to_classify.append(r)
 
-    # 4. AI CLASSIFICATION (Gemini 2.0 Flash)
+    # 4. AI CLASSIFICATION
     if to_classify:
         print(f"🧠 Sending {len(to_classify)} records to Gemini (2.0 Flash)...")
         chunk_size = 30
@@ -87,27 +87,30 @@ def process_and_classify_permits(records: List[PermitRecord]):
                 batch_prompt += f"\nInput ID {idx}: ${r.valuation} | {r.description[:200]}"
 
             try:
-                # CHANGED: Back to 2.0-flash which worked for you previously
                 response = ai_client.models.generate_content(
                     model="gemini-2.0-flash",
                     contents=batch_prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 
+                # --- MARKDOWN CLEANER (THE FIX) ---
+                clean_text = response.text
+                if "```" in clean_text:
+                    clean_text = clean_text.replace("```json", "").replace("```", "").strip()
+                
                 try:
-                    raw_json = json.loads(response.text)
-                except Exception:
+                    raw_json = json.loads(clean_text)
+                except Exception as e:
+                    print(f"⚠️ JSON Parse Error: {e}")
                     raw_json = []
 
-                # --- CRITICAL: SAVE THE DATA ---
-                # This block was missing in previous failed versions
+                # Apply Updates
                 for item in raw_json:
                     try:
                         record_idx = int(item.get("id"))
                         if 0 <= record_idx < len(chunk):
                             target_record = chunk[record_idx]
                             
-                            # Map String to Enum
                             tier_str = str(item.get("tier", "Unknown")).upper()
                             if "COMMERCIAL" in tier_str:
                                 target_record.complexity_tier = ComplexityTier.COMMERCIAL
@@ -122,7 +125,6 @@ def process_and_classify_permits(records: List[PermitRecord]):
                             target_record.ai_rationale = item.get("rationale", "AI Classified")
                     except Exception:
                         continue
-                # -------------------------------
                         
             except Exception as e:
                 print(f"❌ AI Batch Error: {e}") 
@@ -131,7 +133,8 @@ def process_and_classify_permits(records: List[PermitRecord]):
     return processed_records + to_classify
 
 def main():
-    cutoff = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    # Widen window to 14 days to ensure we catch Fort Worth data
+    cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
     all_data = []
 
     print("🛰️ Fetching Austin...")
@@ -143,7 +146,6 @@ def main():
     print("🛰️ Fetching San Antonio...")
     all_data.extend(get_san_antonio_data(cutoff))
     
-    # Keeping Fort Worth safe/simple
     print("🛰️ Fetching Fort Worth...")
     all_data.extend(get_fort_worth_data(cutoff))
     
@@ -156,11 +158,9 @@ def main():
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
     
-    # Deduplication & Upload
     unique_batch: Dict[str, dict] = {}
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
-        # Pydantic V2 dump, excluding extra fields
         r_dict = r.model_dump(mode='json', exclude={'latitude', 'longitude'})
         unique_batch[key] = r_dict
 
