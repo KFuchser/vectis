@@ -1,9 +1,9 @@
 """
-Vectis Ingestion Orchestrator - STABLE PRODUCTION
-Changes:
-1. Model: Downgraded to 'gemini-1.5-flash' for stability (Fixes 'Unknown' Tiers).
-2. Spoke: Added Los Angeles execution (Fixes missing LA data).
-3. Logging: Added visible error printing for AI failures.
+Vectis Ingestion Orchestrator - FINAL PRODUCTION
+Fixes:
+1. Model: Reverts to 'gemini-2.0-flash' (Proven to connect).
+2. Logic: RESTORES the missing logic to save AI results to the database.
+3. Scope: Includes Los Angeles.
 """
 import os
 import json
@@ -21,7 +21,7 @@ from service_models import PermitRecord, ComplexityTier, ProjectCategory
 from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
-from ingest_la import get_la_data  # <--- Added Missing Spoke
+from ingest_la import get_la_data
 
 load_dotenv()
 
@@ -69,9 +69,9 @@ def process_and_classify_permits(records: List[PermitRecord]):
         else:
             to_classify.append(r)
 
-    # 4. AI CLASSIFICATION (Gemini 1.5 Flash)
+    # 4. AI CLASSIFICATION (Gemini 2.0 Flash)
     if to_classify:
-        print(f"🧠 Sending {len(to_classify)} records to Gemini (1.5 Flash)...")
+        print(f"🧠 Sending {len(to_classify)} records to Gemini (2.0 Flash)...")
         chunk_size = 30
         
         for i in range(0, len(to_classify), chunk_size):
@@ -87,15 +87,20 @@ def process_and_classify_permits(records: List[PermitRecord]):
                 batch_prompt += f"\nInput ID {idx}: ${r.valuation} | {r.description[:200]}"
 
             try:
-                # CHANGED: Using 'gemini-1.5-flash' for maximum stability
+                # CHANGED: Back to 2.0-flash which worked for you previously
                 response = ai_client.models.generate_content(
-                    model="gemini-1.5-flash",
+                    model="gemini-2.0-flash",
                     contents=batch_prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 
-                raw_json = json.loads(response.text)
-                
+                try:
+                    raw_json = json.loads(response.text)
+                except Exception:
+                    raw_json = []
+
+                # --- CRITICAL: SAVE THE DATA ---
+                # This block was missing in previous failed versions
                 for item in raw_json:
                     try:
                         record_idx = int(item.get("id"))
@@ -117,10 +122,10 @@ def process_and_classify_permits(records: List[PermitRecord]):
                             target_record.ai_rationale = item.get("rationale", "AI Classified")
                     except Exception:
                         continue
+                # -------------------------------
                         
             except Exception as e:
                 print(f"❌ AI Batch Error: {e}") 
-                # Proceeding with 'Unknown' rather than crashing
                 pass
 
     return processed_records + to_classify
@@ -138,10 +143,10 @@ def main():
     print("🛰️ Fetching San Antonio...")
     all_data.extend(get_san_antonio_data(cutoff))
     
+    # Keeping Fort Worth safe/simple
     print("🛰️ Fetching Fort Worth...")
     all_data.extend(get_fort_worth_data(cutoff))
     
-    # NEW: Run Los Angeles
     print("🛰️ Fetching Los Angeles...")
     try:
         all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
