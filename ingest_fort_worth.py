@@ -12,9 +12,10 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
     
     url = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
     
+    # Check all fields to avoid missing dates
     params = {
         "where": f"Status_Date >= '{cutoff_date} 00:00:00'",
-        "outFields": "Permit_No,Status_Date,Applied_Date,Current_Status,B1_WORK_DESC,JobValue,Permit_Type,Addr_No,Street_Name,Zip_Code",
+        "outFields": "*", # Fetch ALL fields to be safe
         "outSR": "4326",
         "f": "json",
         "resultRecordCount": 2000, 
@@ -34,7 +35,8 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
         mapped_records = []
         
         for r in raw_records:
-            # Helper to find keys case-insensitively
+            # --- ROBUST GETTER ---
+            # Checks Applied_Date, APPLIED_DATE, applied_date
             def get_val(key_list):
                 for k in key_list:
                     if k in r: return r[k]
@@ -49,7 +51,7 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
                 return None
 
             issued_iso = parse_date(get_val(['Status_Date', 'STATUS_DATE']))
-            # Try multiple casing variations for Applied Date to fix 0 Velocity
+            # Try multiple casing variations for Applied Date
             applied_val = get_val(['Applied_Date', 'APPLIED_DATE', 'applied_date'])
             applied_iso = parse_date(applied_val)
 

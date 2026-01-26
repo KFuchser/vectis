@@ -1,12 +1,13 @@
 """
-Vectis Ingestion Orchestrator - PRODUCTION
+Vectis Ingestion Orchestrator - DIAGNOSTIC MODE
 Fixes:
-1. Markdown Cleaning: Strips ```json tags so AI responses don't fail silently.
-2. Model: Gemini-2.0-Flash.
-3. Scope: Austin, SA, Fort Worth, LA.
+1. Regex JSON Parsing: Extracts [...] from messy AI responses.
+2. Verbose Logging: PRINTS the AI's response so we can verify it works.
+3. Robust ID Matching: Handles string/int ID mismatches.
 """
 import os
 import json
+import re
 from typing import List, Dict
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -14,10 +15,7 @@ from datetime import datetime, timedelta
 import google.genai as genai
 from google.genai import types
 
-# Models
 from service_models import PermitRecord, ComplexityTier, ProjectCategory
-
-# Spokes
 from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
@@ -33,6 +31,20 @@ SOCRATA_TOKEN = os.getenv("SOCRATA_APP_TOKEN", None)
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_KEY)
+
+def extract_json_from_text(text: str):
+    """
+    Robustly finds a JSON list [...] inside any text using Regex.
+    """
+    try:
+        # Look for content between [ and ]
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        # Fallback: Try straight load
+        return json.loads(text)
+    except Exception:
+        return []
 
 def process_and_classify_permits(records: List[PermitRecord]):
     if not records: return []
@@ -69,7 +81,7 @@ def process_and_classify_permits(records: List[PermitRecord]):
         else:
             to_classify.append(r)
 
-    # 4. AI CLASSIFICATION
+    # 4. AI CLASSIFICATION (Gemini 2.0 Flash)
     if to_classify:
         print(f"🧠 Sending {len(to_classify)} records to Gemini (2.0 Flash)...")
         chunk_size = 30
@@ -77,10 +89,13 @@ def process_and_classify_permits(records: List[PermitRecord]):
         for i in range(0, len(to_classify), chunk_size):
             chunk = to_classify[i:i + chunk_size]
             
+            # Detailed Prompt to force clean JSON
             batch_prompt = """
-            You are a Permit Classification Engine.
-            Classify into TIER: 'Commercial', 'Residential', 'Commodity'.
-            Return JSON list: [{"id": 0, "tier": "Commercial", "category": "Retail", "rationale": "..."}]
+            Role: Civil Engineering classifier.
+            Task: Classify these permits into: 'Commercial', 'Residential', 'Commodity'.
+            Output: A pure JSON list of objects. No markdown. No intro text.
+            Format: [{"id": 0, "tier": "Commercial", "category": "Retail", "rationale": "..."}]
+            
             INPUT DATA:
             """
             for idx, r in enumerate(chunk):
@@ -93,21 +108,21 @@ def process_and_classify_permits(records: List[PermitRecord]):
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 
-                # --- MARKDOWN CLEANER (THE FIX) ---
-                clean_text = response.text
-                if "```" in clean_text:
-                    clean_text = clean_text.replace("```json", "").replace("```", "").strip()
+                # --- DEBUG: Print the first response to verify it works ---
+                if i == 0:
+                    print(f"🔎 DEBUG AI RESPONSE SAMPLE:\n{response.text[:200]}...\n")
+
+                # --- ROBUST PARSING ---
+                raw_json = extract_json_from_text(response.text)
                 
-                try:
-                    raw_json = json.loads(clean_text)
-                except Exception as e:
-                    print(f"⚠️ JSON Parse Error: {e}")
-                    raw_json = []
+                if not raw_json and i == 0:
+                    print("⚠️ WARNING: JSON Extraction failed for first batch.")
 
                 # Apply Updates
                 for item in raw_json:
                     try:
-                        record_idx = int(item.get("id"))
+                        # Handle string/int ID mismatch
+                        record_idx = int(str(item.get("id")))
                         if 0 <= record_idx < len(chunk):
                             target_record = chunk[record_idx]
                             
@@ -133,7 +148,6 @@ def process_and_classify_permits(records: List[PermitRecord]):
     return processed_records + to_classify
 
 def main():
-    # Widen window to 14 days to ensure we catch Fort Worth data
     cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
     all_data = []
 
@@ -158,6 +172,7 @@ def main():
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
     
+    # Deduplication
     unique_batch: Dict[str, dict] = {}
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
