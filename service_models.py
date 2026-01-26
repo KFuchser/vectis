@@ -3,51 +3,56 @@ Defines the core Pydantic data models for the Vectis pipeline.
 This includes the central `PermitRecord` model and enumerated types for classification,
 ensuring data consistency across all ingestion and processing scripts.
 """
-import os
+"""
+Vectis Service Models
+Defines the Pydantic schemas and Enums for the Data Factory.
+"""
 from enum import Enum
 from typing import Optional
-from pydantic import BaseModel, Field
-from dotenv import load_dotenv
-
-load_dotenv()
+from pydantic import BaseModel
 
 class ComplexityTier(str, Enum):
     """
-    Categorizes permits based on strategic value and processing complexity.
-    Used to filter high-value opportunities from noise.
+    The 3-Tier Taxonomy.
     """
-    STRATEGIC = "Strategic"   # High-value: Retail, Multi-family, Industrial
-    COMMODITY = "Commodity"   # Low-value: Single Family, Trade permits (MEP)
+    COMMODITY = "Commodity"     # Low value, high volume
+    RESIDENTIAL = "Residential" # The missing piece causing your crash
+    COMMERCIAL = "Commercial"   # High value, strategic
     UNKNOWN = "Unknown"
 
 class ProjectCategory(str, Enum):
     """
-    Specific classification for the type of construction work.
-    Specificity here forces the AI to be more accurate.
+    Granular categorization for AI and reporting.
     """
     RESIDENTIAL_NEW = "Residential - New Construction"
-    RESIDENTIAL_ALTERATION = "Residential - Alteration/Addition" 
-    COMMERCIAL_NEW = "Commercial - New Construction"
-    COMMERCIAL_ALTERATION = "Commercial - Tenant Improvement" 
-    INFRASTRUCTURE = "Infrastructure/Public Works"
-    TRADE_ONLY = "Trade Only (MEP/Roofing)"
+    RESIDENTIAL_ALTERATION = "Residential - Alteration"
+    COMMERCIAL_NEW = "Commercial - New"
+    COMMERCIAL_TI = "Commercial - Tenant Improvement"
+    TRADE_ONLY = "Trade Only"
+    UNKNOWN = "Unknown"
 
 class PermitRecord(BaseModel):
     """
-    Lean Data Model (v2.1 Quality Lock - Hotfix)
-    Ensures backward compatibility with existing ingestors.
+    The Master Record. All spokes must return this shape.
     """
-    city: str
     permit_id: str
-    applied_date: Optional[str] = None
-    issued_date: Optional[str] = None
-    description: str
+    city: str
+    description: Optional[str] = "No Description"
     valuation: float = 0.0
-    status: str
+    status: Optional[str] = "Unknown"
     
-    # Logic fields (Populated by the Orchestrator)
+    # Dates
+    applied_date: Optional[str] = None # ISO Format YYYY-MM-DD
+    issued_date: Optional[str] = None  # ISO Format YYYY-MM-DD
+    
+    # Intelligence Fields (Populated by Ingest Orchestrator)
     complexity_tier: ComplexityTier = ComplexityTier.UNKNOWN
+    project_category: ProjectCategory = ProjectCategory.UNKNOWN
+    ai_rationale: Optional[str] = None
     
-    # FIX: Explicitly set default=None so ingestors don't crash
-    project_category: Optional[ProjectCategory] = None
-    ai_rationale: Optional[str] = Field(default=None, description="Short reason for classification.")
+    # Location (Optional for MVP)
+    latitude: Optional[float] = 0.0
+    longitude: Optional[float] = 0.0
+
+    class Config:
+        use_enum_values = True # Critical for Supabase JSON compatibility
