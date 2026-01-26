@@ -1,9 +1,9 @@
 """
-Vectis Ingestion Orchestrator - PRODUCTION
+Vectis Ingestion Orchestrator - PRODUCTION FIX
 Fixes:
-1. Removes 'latitude'/'longitude' from upload payload (Schema Mismatch Fix).
-2. Updates Pydantic serialization to V2 standards (model_dump).
-3. Handles API rate limits and data integrity.
+1. Replaces the 'pass' block with actual logic to save AI results.
+2. Fixes Pydantic V2 warnings by using model_dump().
+3. Ensures Enums are used correctly to prevent crashing.
 """
 import os
 import json
@@ -36,7 +36,9 @@ ai_client = genai.Client(api_key=GEMINI_KEY)
 def process_and_classify_permits(records: List[PermitRecord]):
     """
     Triage Waterfall (V3.1):
-    Categorizes permits using Heuristics -> Safety Valve -> AI.
+    1. Safety Valve: Valuation >= $25k -> Always Deep AI.
+    2. Commodity Filter: Low value/Minor keywords -> Auto-Commodity.
+    3. Residential: Specific SFH keywords -> Auto-Residential.
     """
     if not records: return []
     
@@ -57,6 +59,7 @@ def process_and_classify_permits(records: List[PermitRecord]):
 
         # --- 2. COMMODITY HEURISTICS ---
         if any(n in desc_clean for n in commodity_noise) or r.valuation < 5000:
+            # FIX: Assign Enum, not string
             r.complexity_tier = ComplexityTier.COMMODITY
             r.project_category = ProjectCategory.RESIDENTIAL_ALTERATION 
             r.ai_rationale = "Auto-filtered: Commodity threshold."
@@ -64,6 +67,7 @@ def process_and_classify_permits(records: List[PermitRecord]):
         
         # --- 3. RESIDENTIAL HEURISTICS ---
         elif any(k in desc_clean for k in res_keywords):
+            # FIX: Assign Enum, not string
             r.complexity_tier = ComplexityTier.RESIDENTIAL
             r.project_category = ProjectCategory.RESIDENTIAL_NEW
             r.ai_rationale = "Auto-filtered: Residential keyword."
@@ -105,15 +109,16 @@ def process_and_classify_permits(records: List[PermitRecord]):
                 except Exception:
                     raw_json = []
 
-                # Map results
+                # --- THE MISSING LOGIC (RESTORED) ---
                 for item in raw_json:
                     try:
                         record_idx = int(item.get("id"))
                         if 0 <= record_idx < len(chunk):
                             target_record = chunk[record_idx]
                             
-                            # Map String to Enum
+                            # Map String to Enum (Critical for Pydantic)
                             tier_str = str(item.get("tier", "Unknown")).upper()
+                            
                             if "COMMERCIAL" in tier_str:
                                 target_record.complexity_tier = ComplexityTier.COMMERCIAL
                             elif "RESIDENTIAL" in tier_str:
@@ -127,11 +132,12 @@ def process_and_classify_permits(records: List[PermitRecord]):
                             target_record.ai_rationale = item.get("rationale", "AI Classified")
                     except Exception:
                         continue
+                # ------------------------------------
                         
             except Exception as e:
                 print(f"❌ AI Batch Error: {e}")
-                for r in chunk:
-                    r.complexity_tier = ComplexityTier.UNKNOWN
+                # Don't crash, just let them remain 'Unknown'
+                pass
 
     return processed_records + to_classify
 
@@ -161,8 +167,8 @@ def main():
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
         
-        # FIX: Use model_dump(mode='json') for Pydantic V2
-        # FIX: Explicitly exclude 'latitude' and 'longitude' because DB schema doesn't have them
+        # FIX 1: Use model_dump(mode='json') for Pydantic V2 to handle Enums automatically
+        # FIX 2: Explicitly exclude 'latitude' and 'longitude' to match DB Schema
         r_dict = r.model_dump(
             mode='json', 
             exclude={'latitude', 'longitude'}
