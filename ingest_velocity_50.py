@@ -1,9 +1,9 @@
 """
-Vectis Ingestion Orchestrator - PRODUCTION FIX
-Fixes:
-1. Replaces the 'pass' block with actual logic to save AI results.
-2. Fixes Pydantic V2 warnings by using model_dump().
-3. Ensures Enums are used correctly to prevent crashing.
+Vectis Ingestion Orchestrator - STABLE PRODUCTION
+Changes:
+1. Model: Downgraded to 'gemini-1.5-flash' for stability (Fixes 'Unknown' Tiers).
+2. Spoke: Added Los Angeles execution (Fixes missing LA data).
+3. Logging: Added visible error printing for AI failures.
 """
 import os
 import json
@@ -14,13 +14,14 @@ from datetime import datetime, timedelta
 import google.genai as genai
 from google.genai import types
 
-# Import Models
+# Models
 from service_models import PermitRecord, ComplexityTier, ProjectCategory
 
-# Import Spokes
+# Spokes
 from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
+from ingest_la import get_la_data  # <--- Added Missing Spoke
 
 load_dotenv()
 
@@ -34,40 +35,32 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_KEY)
 
 def process_and_classify_permits(records: List[PermitRecord]):
-    """
-    Triage Waterfall (V3.1):
-    1. Safety Valve: Valuation >= $25k -> Always Deep AI.
-    2. Commodity Filter: Low value/Minor keywords -> Auto-Commodity.
-    3. Residential: Specific SFH keywords -> Auto-Residential.
-    """
     if not records: return []
     
     processed_records = []
     to_classify = []
     
-    # HEURISTIC KEYWORDS
+    # HEURISTICS
     commodity_noise = ["pool", "spa", "sign", "fence", "roof", "siding", "demolition", "irrigation", "solar", "driveway"]
     res_keywords = ["single family", "sfh", "detached", "duplex", "townhouse", "garage", "adu"]
 
     for r in records:
         desc_clean = (r.description or "").lower()
 
-        # --- 1. STRATEGIC SAFETY VALVE (>$25k) ---
+        # 1. SAFETY VALVE (>$25k) -> AI
         if r.valuation >= 25000:
             to_classify.append(r)
             continue
 
-        # --- 2. COMMODITY HEURISTICS ---
+        # 2. COMMODITY
         if any(n in desc_clean for n in commodity_noise) or r.valuation < 5000:
-            # FIX: Assign Enum, not string
             r.complexity_tier = ComplexityTier.COMMODITY
             r.project_category = ProjectCategory.RESIDENTIAL_ALTERATION 
             r.ai_rationale = "Auto-filtered: Commodity threshold."
             processed_records.append(r)
         
-        # --- 3. RESIDENTIAL HEURISTICS ---
+        # 3. RESIDENTIAL
         elif any(k in desc_clean for k in res_keywords):
-            # FIX: Assign Enum, not string
             r.complexity_tier = ComplexityTier.RESIDENTIAL
             r.project_category = ProjectCategory.RESIDENTIAL_NEW
             r.ai_rationale = "Auto-filtered: Residential keyword."
@@ -76,49 +69,41 @@ def process_and_classify_permits(records: List[PermitRecord]):
         else:
             to_classify.append(r)
 
-    # --- 4. BATCH AI CLASSIFICATION ---
+    # 4. AI CLASSIFICATION (Gemini 1.5 Flash)
     if to_classify:
-        print(f"🧠 Sending {len(to_classify)} records to Gemini...")
+        print(f"🧠 Sending {len(to_classify)} records to Gemini (1.5 Flash)...")
         chunk_size = 30
         
         for i in range(0, len(to_classify), chunk_size):
             chunk = to_classify[i:i + chunk_size]
             
-            # Prompt
             batch_prompt = """
             You are a Permit Classification Engine.
             Classify into TIER: 'Commercial', 'Residential', 'Commodity'.
-            
             Return JSON list: [{"id": 0, "tier": "Commercial", "category": "Retail", "rationale": "..."}]
-            
             INPUT DATA:
             """
             for idx, r in enumerate(chunk):
                 batch_prompt += f"\nInput ID {idx}: ${r.valuation} | {r.description[:200]}"
 
             try:
+                # CHANGED: Using 'gemini-1.5-flash' for maximum stability
                 response = ai_client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-1.5-flash",
                     contents=batch_prompt,
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 
-                # Parse JSON
-                try:
-                    raw_json = json.loads(response.text)
-                except Exception:
-                    raw_json = []
-
-                # --- THE MISSING LOGIC (RESTORED) ---
+                raw_json = json.loads(response.text)
+                
                 for item in raw_json:
                     try:
                         record_idx = int(item.get("id"))
                         if 0 <= record_idx < len(chunk):
                             target_record = chunk[record_idx]
                             
-                            # Map String to Enum (Critical for Pydantic)
+                            # Map String to Enum
                             tier_str = str(item.get("tier", "Unknown")).upper()
-                            
                             if "COMMERCIAL" in tier_str:
                                 target_record.complexity_tier = ComplexityTier.COMMERCIAL
                             elif "RESIDENTIAL" in tier_str:
@@ -132,11 +117,10 @@ def process_and_classify_permits(records: List[PermitRecord]):
                             target_record.ai_rationale = item.get("rationale", "AI Classified")
                     except Exception:
                         continue
-                # ------------------------------------
                         
             except Exception as e:
-                print(f"❌ AI Batch Error: {e}")
-                # Don't crash, just let them remain 'Unknown'
+                print(f"❌ AI Batch Error: {e}") 
+                # Proceeding with 'Unknown' rather than crashing
                 pass
 
     return processed_records + to_classify
@@ -147,8 +131,7 @@ def main():
 
     print("🛰️ Fetching Austin...")
     try:
-        austin_recs = get_austin_data(SOCRATA_TOKEN, cutoff)
-        all_data.extend(austin_recs)
+        all_data.extend(get_austin_data(SOCRATA_TOKEN, cutoff))
     except Exception as e:
         print(f"⚠️ Austin Failed: {e}")
 
@@ -157,29 +140,29 @@ def main():
     
     print("🛰️ Fetching Fort Worth...")
     all_data.extend(get_fort_worth_data(cutoff))
+    
+    # NEW: Run Los Angeles
+    print("🛰️ Fetching Los Angeles...")
+    try:
+        all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
+    except Exception as e:
+        print(f"⚠️ LA Failed: {e}")
 
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
     
-    # --- 5. DEDUPLICATION & SERIALIZATION (CRITICAL FIX) ---
+    # Deduplication & Upload
     unique_batch: Dict[str, dict] = {}
-    
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
-        
-        # FIX 1: Use model_dump(mode='json') for Pydantic V2 to handle Enums automatically
-        # FIX 2: Explicitly exclude 'latitude' and 'longitude' to match DB Schema
-        r_dict = r.model_dump(
-            mode='json', 
-            exclude={'latitude', 'longitude'}
-        )
+        # Pydantic V2 dump, excluding extra fields
+        r_dict = r.model_dump(mode='json', exclude={'latitude', 'longitude'})
         unique_batch[key] = r_dict
 
     data_to_upsert = list(unique_batch.values())
 
     if data_to_upsert:
         try:
-            # 6. UPSERT WITH CONFLICT HANDLING
             response = supabase.table("permits").upsert(
                 data_to_upsert, 
                 on_conflict="city, permit_id"
