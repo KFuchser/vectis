@@ -1,3 +1,8 @@
+"""
+A simple diagnostic script to verify that the Google Gemini API is accessible and responsive.
+It sends a test prompt to the 'gemini-1.5-flash' model and prints the result,
+helping to confirm that the API key and network connection are valid.
+"""
 import os
 import google.generativeai as genai
 

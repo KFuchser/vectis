@@ -1,3 +1,7 @@
+"""
+Ingestion spoke for Austin, TX.
+Connects to the City of Austin's Socrata open data portal to fetch recently applied-for or issued building permits.
+"""
 import os
 import requests
 import pandas as pd

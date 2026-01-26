@@ -1,3 +1,10 @@
+"""
+A historical data sanitization script, also known as "Operation Deep Clean".
+
+This script fetches all records from the 'permits' table in Supabase, applies a series of
+"Iron Dome" data cleaning protocols (e.g., fixing date paradoxes, reclassifying zero-value
+and imposter records), and then pushes the cleaned data back to the database.
+"""
 import os
 import pandas as pd
 import numpy as np

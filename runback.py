@@ -1,3 +1,9 @@
+"""
+A batch processing script to "run back" and classify historical permit records
+in the Supabase database that are missing a `project_category`.
+
+It fetches records in chunks, sends them to the Gemini AI for classification, and upserts the results.
+"""
 import os
 import json
 import time

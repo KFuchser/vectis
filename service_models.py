@@ -1,3 +1,8 @@
+"""
+Defines the core Pydantic data models for the Vectis pipeline.
+This includes the central `PermitRecord` model and enumerated types for classification,
+ensuring data consistency across all ingestion and processing scripts.
+"""
 import os
 from enum import Enum
 from typing import Optional
@@ -7,12 +12,19 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class ComplexityTier(str, Enum):
+    """
+    Categorizes permits based on strategic value and processing complexity.
+    Used to filter high-value opportunities from noise.
+    """
     STRATEGIC = "Strategic"   # High-value: Retail, Multi-family, Industrial
     COMMODITY = "Commodity"   # Low-value: Single Family, Trade permits (MEP)
     UNKNOWN = "Unknown"
 
 class ProjectCategory(str, Enum):
-    # SPECIFICITY FORCES ACCURACY
+    """
+    Specific classification for the type of construction work.
+    Specificity here forces the AI to be more accurate.
+    """
     RESIDENTIAL_NEW = "Residential - New Construction"
     RESIDENTIAL_ALTERATION = "Residential - Alteration/Addition" 
     COMMERCIAL_NEW = "Commercial - New Construction"

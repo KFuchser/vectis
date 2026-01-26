@@ -1,3 +1,8 @@
+"""
+A simple Streamlit web application that serves as a control panel for the
+Vectis Data Factory. It provides buttons to fetch mock permit data and
+run it through the AI processing pipeline, displaying live logs of the process.
+"""
 import streamlit as st
 import pandas as pd
 # Import the logic you built in agent_main

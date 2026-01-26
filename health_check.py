@@ -1,3 +1,9 @@
+"""
+A data integrity and system health monitoring script for the Vectis pipeline.
+
+It connects to the Supabase database and runs a series of checks, such as verifying
+daily data ingestion volume and scanning for data anomalies like "time travel" permits.
+"""
 import os
 from supabase import create_client
 from datetime import datetime

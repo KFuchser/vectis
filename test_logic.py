@@ -1,3 +1,7 @@
+"""
+A simple script for testing the business logic embedded in the Pydantic models.
+It creates several instances of the `PermitRecord` model with different test data to verify field defaults and property calculations.
+"""
 from service_models import PermitRecord
 
 # --- TEST CASES ---

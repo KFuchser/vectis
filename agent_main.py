@@ -1,4 +1,11 @@
 # agent_main.py
+"""
+This script defines the core AI and database interaction logic for the Vectis pipeline.
+
+It contains the `run_permit_agent` function, which uses LangChain and Google Gemini
+to parse a permit description into a structured Pydantic model, and the
+`save_permit_to_db` function, which saves that structured data to a Supabase database.
+"""
 import os
 import streamlit as st # If you need secrets from Streamlit
 from langchain_google_genai import ChatGoogleGenerativeAI

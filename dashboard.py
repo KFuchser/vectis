@@ -1,111 +1,166 @@
+"""
+A Streamlit-based dashboard for visualizing permit data from the Supabase database.
+
+It provides filtering controls and displays metrics and charts, such as a time-series
+analysis of permit processing velocity across different cities.
+"""
+"""
+Vectis Command Console - V3.0 Taxonomy Patch
+Mission: Visualize 3-Tier Permit Data (Commodity, Residential, Commercial).
+Strategy: UI-layer filtering for Valuation and Jurisdiction.
+"""
 import streamlit as st
 import pandas as pd
 import altair as alt
 from supabase import create_client, Client
 
+# --- PAGE SETUP ---
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
-st.markdown("""<style>.metric-card { background-color: #F0F4F8; border-left: 5px solid #C87F42; padding: 15px; }</style>""", unsafe_allow_html=True)
+st.markdown("""
+    <style>
+    .metric-card { background-color: #F0F4F8; border-left: 5px solid #C87F42; padding: 15px; border-radius: 5px; }
+    .stMetric { background-color: #ffffff; padding: 10px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    </style>
+    """, unsafe_allow_html=True)
 
 # --- PERMISSIVE DATA LOADER ---
 @st.cache_data(ttl=600)
 def load_data():
     try:
+        # Pulling from Streamlit Secrets for Solopreneur Stack security
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # 1. Fetch ALL Data
+        # 1. Fetch ALL Data (We filter in the UI now)
         response = supabase.table('permits').select("*").execute()
-        if not response.data: return pd.DataFrame()
+        if not response.data: 
+            return pd.DataFrame()
+        
         df = pd.DataFrame(response.data)
 
-        # 2. Rename & Type Convert
-        if 'issued_date' in df.columns: df = df.rename(columns={'issued_date': 'issue_date'})
+        # 2. Schema Normalization
+        if 'issued_date' in df.columns: 
+            df = df.rename(columns={'issued_date': 'issue_date'})
         
-        if 'issue_date' in df.columns: df['issue_date'] = pd.to_datetime(df['issue_date'], errors='coerce')
-        if 'applied_date' in df.columns: df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
+        # Convert dates and handle NaT
+        date_cols = ['issue_date', 'applied_date']
+        for col in date_cols:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce')
 
-        # 3. Velocity Logic
-        if 'processing_days' in df.columns:
-            df['velocity'] = pd.to_numeric(df['processing_days'], errors='coerce')
-        else:
-            df['velocity'] = None
-
-        # Fallback calc
-        mask = df['velocity'].isna() & df['issue_date'].notna() & df['applied_date'].notna()
-        df.loc[mask, 'velocity'] = (df.loc[mask, 'issue_date'] - df.loc[mask, 'applied_date']).dt.days
-
-        # 4. Cleanup
-        if 'complexity_tier' not in df.columns: df['complexity_tier'] = 'Unknown'
-        df['complexity_tier'] = df['complexity_tier'].fillna('Unknown')
-        
-        if 'valuation' in df.columns:
-            df['valuation'] = pd.to_numeric(df['valuation'], errors='coerce').fillna(0)
-        else:
-            df['valuation'] = 0
+        # 3. Velocity Calculation (Friction Metric)
+        if 'issue_date' in df.columns and 'applied_date' in df.columns:
+            df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
+            # Filter out "Time Travel" errors for visualization
+            df.loc[df['velocity'] < 0, 'velocity'] = None
 
         return df
-
     except Exception as e:
-        st.error(f"Data Error: {e}")
+        st.error(f"Database Connection Failed: {e}")
         return pd.DataFrame()
 
-df = load_data()
+df_raw = load_data()
 
-# --- SIDEBAR ---
-st.sidebar.title("VECTIS INDICES")
-st.sidebar.caption("v5.1 | FIX: ALTAIR SYNTAX")
-
-if df.empty:
-    st.error("Database returned 0 records.")
+if df_raw.empty:
+    st.warning("No data found in Supabase. Run ingestion_velocity_50.py first.")
     st.stop()
 
-# Filter Controls
-all_tiers = sorted(df['complexity_tier'].unique().tolist())
-selected_tiers = st.sidebar.multiselect("Permit Class", all_tiers, default=all_tiers)
-show_bad_data = st.sidebar.checkbox("Show Records with Missing Dates?", value=True)
+# --- SIDEBAR: THE COMMAND VALVE ---
+st.sidebar.image("https://via.placeholder.com/150x50?text=VECTIS+INDICES", use_column_width=True)
+st.sidebar.title("🎛️ Data Controls")
 
-if show_bad_data:
-    df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
-else:
-    df_filtered = df[df['complexity_tier'].isin(selected_tiers)]
-    df_filtered = df_filtered.dropna(subset=['velocity'])
-    df_filtered = df_filtered[df_filtered['velocity'] > 0]
+# A. City Multi-select
+cities = sorted(df_raw['city'].unique().tolist())
+selected_cities = st.sidebar.multiselect("Jurisdictions", cities, default=cities)
 
-# --- CHARTS (Fixed Schema) ---
-st.markdown("### 📉 Velocity Trends")
+# B. Taxonomy Tier Filter (The V3.0 Patch)
+tiers = ["Commercial", "Residential", "Commodity", "Unknown"]
+selected_tiers = st.sidebar.multiselect("Complexity Tiers", tiers, default=["Commercial", "Residential"])
 
-if 'issue_date' in df_filtered.columns:
-    chart_df = df_filtered.dropna(subset=['issue_date', 'velocity'])
-    chart_df = chart_df[chart_df['velocity'] > 0] 
+# C. Valuation Slider (The "San Antonio" UI Valve)
+# Setting default to $50k as per original Velocity requirements, but allowing 0 to see all.
+max_val_found = int(df_raw['valuation'].max()) if not df_raw.empty else 1000000
+min_val = st.sidebar.slider("Min Valuation ($)", 0, 500000, 50000, step=5000)
+
+# Apply Global Filters
+mask = (
+    df_raw['city'].isin(selected_cities) & 
+    df_raw['complexity_tier'].isin(selected_tiers) & 
+    (df_raw['valuation'] >= min_val)
+)
+df = df_raw[mask].copy()
+
+# --- MAIN DASHBOARD ---
+st.title("🏛️ National Regulatory Friction Index")
+st.subheader("Q1 Bureaucracy Leaderboard (Stable)")
+
+# --- METRIC ROW ---
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.metric("Total Permits", len(df))
+with m2:
+    avg_velocity = df['velocity'].median() if 'velocity' in df.columns else 0
+    st.metric("Median Lead Time", f"{avg_velocity:.0f} Days")
+with m3:
+    total_value = df['valuation'].sum() / 1_000_000
+    st.metric("Total Pipeline Value", f"${total_value:.1f}M")
+with m4:
+    friction_count = len(df[df['velocity'] > 180]) if 'velocity' in df.columns else 0
+    st.metric("High Friction (>180d)", friction_count)
+
+# --- CHART: VELOCITY TRENDS ---
+st.markdown("### 📉 Permitting Velocity by Jurisdiction")
+if 'issue_date' in df.columns and not df.empty:
+    # Prepare trend data
+    chart_df = df.dropna(subset=['issue_date', 'velocity'])
+    chart_df = chart_df[chart_df['velocity'] >= 0]
     
     if not chart_df.empty:
-        # Create explicit Month column
+        # Resample to monthly median
         chart_df['month'] = chart_df['issue_date'].dt.to_period('M').apply(lambda r: r.start_time)
         trend = chart_df.groupby(['city', 'month'])['velocity'].median().reset_index()
         
-        # FIX: Strict Schema Compliance for Altair
-        line = alt.Chart(trend).mark_line(point=True).encode(
-            x=alt.X('month:T', title='Month', axis=alt.Axis(format='%b %Y')), # Explicit Type :T and correct Axis param
-            y=alt.Y('velocity:Q', title='Median Days'), # Explicit Type :Q
-            color=alt.Color('city:N', legend=alt.Legend(title="Jurisdiction")), # Explicit Type :N
+        line_chart = alt.Chart(trend).mark_line(point=True).encode(
+            x=alt.X('month:T', title='Issue Month'),
+            y=alt.Y('velocity:Q', title='Median Days to Issue'),
+            color=alt.Color('city:N', scale=alt.Scale(scheme='tableau10')),
             tooltip=['city', 'month', 'velocity']
-        ).interactive()
+        ).properties(height=400).interactive()
         
-        st.altair_chart(line, use_container_width=True)
+        st.altair_chart(line_chart, use_container_width=True)
     else:
-        st.warning("Filters active, but no records have valid Dates + Velocity to plot.")
+        st.info("Insufficient date data to plot velocity trends.")
 
-# --- DATA TABLE ---
-st.markdown("### 📋 Data Inspection")
+# --- CHART: TAXONOMY DISTRIBUTION ---
+c1, c2 = st.columns(2)
+with c1:
+    st.markdown("### 🏷️ Tier Distribution")
+    tier_chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X('count():Q', title='Permit Count'),
+        y=alt.Y('complexity_tier:N', sort='-x', title='Tier'),
+        color=alt.Color('complexity_tier:N', legend=None)
+    ).properties(height=300)
+    st.altair_chart(tier_chart, use_container_width=True)
+
+with c2:
+    st.markdown("### 💰 Value by Jurisdiction")
+    val_chart = alt.Chart(df).mark_arc(innerRadius=50).encode(
+        theta=alt.Theta(field="valuation", type="quantitative", aggregate="sum"),
+        color=alt.Color(field="city", type="nominal"),
+        tooltip=['city', 'valuation']
+    ).properties(height=300)
+    st.altair_chart(val_chart, use_container_width=True)
+
+# --- DATA INSPECTION TABLE ---
+st.markdown("### 📋 Detailed Records")
+# Formatting valuation for readability
+display_df = df[['city', 'complexity_tier', 'valuation', 'velocity', 'description', 'issue_date']].copy()
+display_df['valuation'] = display_df['valuation'].apply(lambda x: f"${x:,.2f}")
 st.dataframe(
-    df_filtered[['city', 'complexity_tier', 'issue_date', 'velocity']].sort_values('issue_date', ascending=False).head(50),
+    display_df.sort_values('issue_date', ascending=False).head(100),
     use_container_width=True
 )
 
-# --- FOOTER ---
-st.divider()
-c1, c2, c3 = st.columns(3)
-with c1: st.metric("Total Records", len(df_filtered))
-with c2: st.metric("Records with Velocity", len(df_filtered.dropna(subset=['velocity'])))
-with c3: st.metric("Missing/Bad Data", len(df_filtered) - len(df_filtered.dropna(subset=['velocity'])))
+st.sidebar.markdown("---")
+st.sidebar.caption(f"Vectis Intelligence Engine v3.0 | Records Loaded: {len(df_raw)}")

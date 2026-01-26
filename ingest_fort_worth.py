@@ -1,3 +1,7 @@
+"""
+Ingestion spoke for Fort Worth, TX.
+Connects to the City of Fort Worth's ArcGIS REST API to fetch recent development permits.
+"""
 import requests
 import pandas as pd
 from datetime import datetime
