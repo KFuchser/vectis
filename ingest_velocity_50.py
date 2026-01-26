@@ -1,9 +1,9 @@
 """
-Vectis Ingestion Orchestrator - STABLE PATCH
+Vectis Ingestion Orchestrator - PRODUCTION
 Fixes:
-1. Pydantic Serialization: Uses Enum members instead of raw strings.
-2. Database Integrity: Handles 'duplicate key' errors via on_conflict argument.
-3. Batch Hygiene: Deduplicates records before sending to Supabase.
+1. Removes 'latitude'/'longitude' from upload payload (Schema Mismatch Fix).
+2. Updates Pydantic serialization to V2 standards (model_dump).
+3. Handles API rate limits and data integrity.
 """
 import os
 import json
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import google.genai as genai
 from google.genai import types
 
-# 1. IMPORT ENUMS (Critical for Pydantic)
+# Import Models
 from service_models import PermitRecord, ComplexityTier, ProjectCategory
 
 # Import Spokes
@@ -36,7 +36,7 @@ ai_client = genai.Client(api_key=GEMINI_KEY)
 def process_and_classify_permits(records: List[PermitRecord]):
     """
     Triage Waterfall (V3.1):
-    Now uses strict Enum assignments to satisfy Pydantic validators.
+    Categorizes permits using Heuristics -> Safety Valve -> AI.
     """
     if not records: return []
     
@@ -57,7 +57,6 @@ def process_and_classify_permits(records: List[PermitRecord]):
 
         # --- 2. COMMODITY HEURISTICS ---
         if any(n in desc_clean for n in commodity_noise) or r.valuation < 5000:
-            # FIX: Use Enum Member, not string
             r.complexity_tier = ComplexityTier.COMMODITY
             r.project_category = ProjectCategory.RESIDENTIAL_ALTERATION 
             r.ai_rationale = "Auto-filtered: Commodity threshold."
@@ -65,7 +64,6 @@ def process_and_classify_permits(records: List[PermitRecord]):
         
         # --- 3. RESIDENTIAL HEURISTICS ---
         elif any(k in desc_clean for k in res_keywords):
-            # FIX: Use Enum Member, not string
             r.complexity_tier = ComplexityTier.RESIDENTIAL
             r.project_category = ProjectCategory.RESIDENTIAL_NEW
             r.ai_rationale = "Auto-filtered: Residential keyword."
@@ -82,7 +80,7 @@ def process_and_classify_permits(records: List[PermitRecord]):
         for i in range(0, len(to_classify), chunk_size):
             chunk = to_classify[i:i + chunk_size]
             
-            # Prompt uses strings, but we map back to Enums
+            # Prompt
             batch_prompt = """
             You are a Permit Classification Engine.
             Classify into TIER: 'Commercial', 'Residential', 'Commodity'.
@@ -101,26 +99,31 @@ def process_and_classify_permits(records: List[PermitRecord]):
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 
-                raw_json = json.loads(response.text)
-                
+                # Parse JSON
+                try:
+                    raw_json = json.loads(response.text)
+                except Exception:
+                    raw_json = []
+
+                # Map results
                 for item in raw_json:
                     try:
                         record_idx = int(item.get("id"))
                         if 0 <= record_idx < len(chunk):
                             target_record = chunk[record_idx]
                             
-                            # MAP STRING TO ENUM (Critical Step)
-                            tier_str = item.get("tier", "Unknown").upper()
-                            if tier_str == "COMMERCIAL":
+                            # Map String to Enum
+                            tier_str = str(item.get("tier", "Unknown")).upper()
+                            if "COMMERCIAL" in tier_str:
                                 target_record.complexity_tier = ComplexityTier.COMMERCIAL
-                            elif tier_str == "RESIDENTIAL":
+                            elif "RESIDENTIAL" in tier_str:
                                 target_record.complexity_tier = ComplexityTier.RESIDENTIAL
-                            elif tier_str == "COMMODITY":
+                            elif "COMMODITY" in tier_str:
                                 target_record.complexity_tier = ComplexityTier.COMMODITY
                             else:
                                 target_record.complexity_tier = ComplexityTier.UNKNOWN
                                 
-                            target_record.project_category = ProjectCategory.UNKNOWN # Simplified for safety
+                            target_record.project_category = ProjectCategory.UNKNOWN 
                             target_record.ai_rationale = item.get("rationale", "AI Classified")
                     except Exception:
                         continue
@@ -152,28 +155,30 @@ def main():
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
     
-    # 5. DEDUPLICATION (Fixes "Duplicate Key" errors within the batch)
-    # Create a dict keyed by the unique constraint to remove dupes inside Python first
+    # --- 5. DEDUPLICATION & SERIALIZATION (CRITICAL FIX) ---
     unique_batch: Dict[str, dict] = {}
+    
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
-        # Convert to dict using Pydantic's .dict() or .model_dump()
-        # Using .dict() for Pydantic v1 compatibility, or .model_dump() for v2
-        # Ensure enums are serialized to strings for JSON
-        r_dict = json.loads(r.json()) 
+        
+        # FIX: Use model_dump(mode='json') for Pydantic V2
+        # FIX: Explicitly exclude 'latitude' and 'longitude' because DB schema doesn't have them
+        r_dict = r.model_dump(
+            mode='json', 
+            exclude={'latitude', 'longitude'}
+        )
         unique_batch[key] = r_dict
 
     data_to_upsert = list(unique_batch.values())
 
     if data_to_upsert:
         try:
-            # 6. UPSERT WITH CONFLICT HANDLING (Fixes API Error 23505)
-            # We explicitly tell Supabase to merge if 'city' and 'permit_id' match.
+            # 6. UPSERT WITH CONFLICT HANDLING
             response = supabase.table("permits").upsert(
                 data_to_upsert, 
                 on_conflict="city, permit_id"
             ).execute()
-            print(f"✅ SUCCESS: Upserted {len(data_to_upsert)} records.")
+            print(f"✅ SUCCESS: Ingested {len(data_to_upsert)} records.")
         except Exception as e:
             print(f"❌ Database Upload Failed: {e}")
     else:
