@@ -2,19 +2,25 @@
 Ingestion spoke for Fort Worth, TX.
 SCHEMA LOCK: Robustly hunts for 'Applied_Date'.
 """
+"""
+Ingestion spoke for Fort Worth, TX.
+VERIFIED SCHEMA (2026-01-27):
+- Applied Date: 'File_Date' (Found via satest.py)
+- Issued Date: 'Status_Date'
+- Future Date Handling: Dashboard will filter > Now.
+"""
 import requests
 from datetime import datetime
 from service_models import PermitRecord, ComplexityTier
 
 def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
-    print(f"🤠 Starting Fort Worth Sync (Cutoff: {cutoff_date})...")
+    print(f"🤠 Starting Fort Worth Sync (Schema Verified)...")
     
     url = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
     
-    # We fetch * (All Fields) to ensure we don't miss the date column
     params = {
         "where": f"Status_Date >= '{cutoff_date} 00:00:00'",
-        "outFields": "*", 
+        "outFields": "*",
         "outSR": "4326",
         "f": "json",
         "resultRecordCount": 2000, 
@@ -32,42 +38,35 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
 
         raw_records = [f["attributes"] for f in data["features"]]
         mapped_records = []
-        now_ts = datetime.now().timestamp()
         
         for r in raw_records:
-            # Smart Getter: Handles Applied_Date, APPLIED_DATE, applied_date
-            def get_val(keys):
-                for k in keys:
-                    if k in r: return r[k]
-                return None
-
-            def parse_date(ms):
+            # 1. PARSE DATES (ArcGIS uses Unix Timestamps in milliseconds)
+            def parse_ms_date(ms):
                 try:
                     if ms: 
-                        # Filter Future Dates (>7 days ahead)
-                        if (ms / 1000.0) > (now_ts + 7 * 86400): return None
                         return datetime.fromtimestamp(ms / 1000.0).strftime('%Y-%m-%d')
                 except: pass
                 return None
 
-            # --- MAPPING LOCK ---
-            issued_iso = parse_date(get_val(['Status_Date', 'STATUS_DATE']))
+            # --- MAPPING LOCK (Based on satest.py) ---
+            # 'File_Date' is the Application Date (Jan 2025 in your logs)
+            applied_iso = parse_ms_date(r.get('File_Date'))
             
-            # The list of suspects for the Start Date
-            applied_val = get_val(['Applied_Date', 'APPLIED_DATE', 'applied_date', 'ApplicationDate', 'Date_Applied'])
-            applied_iso = parse_date(applied_val)
+            # 'Status_Date' is the Issue/Expiration Date (Aug 2026 in your logs)
+            issued_iso = parse_ms_date(r.get('Status_Date'))
 
             if not issued_iso: continue
 
-            desc = get_val(['B1_WORK_DESC', 'B1_Work_Desc']) or get_val(['Permit_Type']) or "Unspecified"
-            val = float(get_val(['JobValue', 'JOBVALUE']) or 0.0)
-            pid = str(get_val(['Permit_No', 'PERMIT_NO']))
+            # 2. OTHER FIELDS
+            desc = r.get('B1_WORK_DESC') or r.get('Permit_Type') or "Unspecified"
+            val = float(r.get('JobValue') or 0.0)
+            pid = str(r.get('Permit_No', 'UNKNOWN'))
 
             record = PermitRecord(
                 permit_id=pid,
                 city="Fort Worth",
                 status="Issued",
-                applied_date=applied_iso,
+                applied_date=applied_iso, # Now populated!
                 issued_date=issued_iso,
                 description=desc,
                 valuation=val,

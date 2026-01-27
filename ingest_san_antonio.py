@@ -1,68 +1,74 @@
 """
 Ingestion spoke for San Antonio, TX.
-PLATFORM MIGRATION: Socrata -> CKAN (SQL).
-Fixes 404 Error by using the new resource ID.
+VERIFIED SCHEMA (2026-01-27):
+- Endpoint: CKAN datastore_search
+- Resource: c21106f9-3ef5-4f3a-8604-f992b4db7512
+- Applied Date: 'DATE SUBMITTED'
+- Issued Date: 'DATE ISSUED'
 """
 import requests
-import urllib.parse
-from datetime import datetime
 from service_models import PermitRecord, ComplexityTier
 
 def get_san_antonio_data(cutoff_date: str) -> list[PermitRecord]:
-    print(f"🤠 Starting San Antonio Sync (CKAN Platform)...")
+    print(f"🤠 Starting San Antonio Sync (Verified CKAN)...")
     
-    # NEW RESOURCE ID (Permits Issued 2020-Present)
-    # Replaces the dead 'cfm2-35h3' endpoint
-    CKAN_ID = "c21106f9-3ef5-4f3a-8604-f992b4db7512"
-    base_url = "https://data.sanantonio.gov/api/3/action/datastore_search_sql"
+    # URL and Resource ID verified by 'satest.py'
+    url = "https://data.sanantonio.gov/api/3/action/datastore_search"
+    resource_id = "c21106f9-3ef5-4f3a-8604-f992b4db7512"
     
-    # SQL Query: Fetch recent permits
-    # We fetch by _id DESC to get the newest entries
-    sql = f"""SELECT * from "{CKAN_ID}" ORDER BY "_id" DESC LIMIT 3000"""
-    
-    encoded_sql = urllib.parse.quote(sql)
-    url = f"{base_url}?sql={encoded_sql}"
+    params = {
+        "resource_id": resource_id,
+        "limit": 3000, 
+        "sort": "_id desc" # Get newest records first
+    }
 
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         data = response.json()
         
         if not data.get("success") or not data["result"]["records"]:
-            print(f"⚠️ San Antonio: No records found.")
+            print(f"⚠️ San Antonio: No records returned.")
             return []
 
         raw_records = data["result"]["records"]
         mapped_records = []
         
         for r in raw_records:
-            def parse_ckan_date(d_str):
-                # Formats can vary: "2026-01-20T00:00:00" or "2026-01-20"
+            # 1. PARSE DATES (Format: "2025-11-18")
+            def parse_date(d_str):
                 if not d_str: return None
-                return d_str.split("T")[0]
+                return str(d_str).split("T")[0]
 
-            # FIELD MAPPING
-            # DATE ISSUED -> issued_date
-            # DATE SUBMITTED -> applied_date (Velocity Key)
-            issued_iso = parse_ckan_date(r.get("DATE ISSUED"))
-            applied_iso = parse_ckan_date(r.get("DATE SUBMITTED"))
+            # 2. EXACT FIELD MAPPING (Based on satest.py output)
+            issued_iso = parse_date(r.get("DATE ISSUED"))
+            applied_iso = parse_date(r.get("DATE SUBMITTED"))
 
-            # Filter by cutoff manually since we didn't do it in SQL
+            # 3. FILTER
+            # Only keep records issued after the cutoff
             if not issued_iso or issued_iso < cutoff_date:
                 continue
 
-            # Valuation cleanup
-            val_str = str(r.get("DECLARED VALUATION") or "0").replace("$", "").replace(",", "")
-            try: val = float(val_str)
-            except: val = 0.0
+            # 4. VALUATION
+            # Handle nulls or strings like "$1,000.00"
+            raw_val = r.get("DECLARED VALUATION")
+            try:
+                if raw_val:
+                    val = float(str(raw_val).replace("$", "").replace(",", ""))
+                else:
+                    val = 0.0
+            except:
+                val = 0.0
 
+            # 5. DESCRIPTION
+            # Use Project Name, fallback to Work Type
             desc = r.get("PROJECT NAME") or r.get("WORK TYPE") or "Unspecified"
 
             record = PermitRecord(
                 permit_id=str(r.get("PERMIT #", "UNKNOWN")),
                 city="San Antonio",
                 status="Issued",
-                applied_date=applied_iso,
+                applied_date=applied_iso, # This enables Velocity calculation
                 issued_date=issued_iso,
                 description=desc,
                 valuation=val,
@@ -70,7 +76,7 @@ def get_san_antonio_data(cutoff_date: str) -> list[PermitRecord]:
             )
             mapped_records.append(record)
         
-        print(f"✅ San Antonio: Retrieved {len(mapped_records)} records.")
+        print(f"✅ San Antonio: Retrieved {len(mapped_records)} valid records.")
         return mapped_records
 
     except Exception as e:
