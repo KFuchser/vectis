@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from supabase import create_client, Client
-from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
@@ -27,7 +26,7 @@ def load_data():
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # INCREASED LIMIT and ORDER
+        # 1. FETCH ENOUGH DATA (50k limit)
         response = supabase.table('permits')\
             .select("*")\
             .order('issued_date', desc=True)\
@@ -40,8 +39,9 @@ def load_data():
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
             
-            # FILTER FUTURE DATES
-            now = pd.Timestamp.now()
+            # 2. TIME GUARD (The Fix for Squished Charts)
+            # Remove any records with dates in the future
+            now = pd.Timestamp.now() + pd.Timedelta(days=1)
             df = df[df['issue_date'] <= now]
             
             df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
@@ -72,7 +72,7 @@ if not df_raw.empty:
 else:
     df = pd.DataFrame()
 
-st.title("🏛️ National Regulatory Friction Index (90-Day View)")
+st.title("🏛️ National Regulatory Friction Index")
 
 if df.empty:
     st.warning("No records found.")
@@ -91,35 +91,36 @@ c4.metric("High Friction (>180d)", len(df[df['velocity'] > 180]))
 st.divider()
 
 # CHARTS
-c_left, c_right = st.columns([2, 1])
+col_vol, col_vel = st.columns(2)
 
-with c_left:
-    st.subheader("📉 Weekly Velocity Trends")
+with col_vol:
+    st.subheader("📊 Weekly Volume")
+    if not df.empty:
+        df['week'] = df['issue_date'].dt.to_period('W').apply(lambda r: r.start_time)
+        line_vol = alt.Chart(df).mark_line(point=True).encode(
+            x=alt.X('week:T', title='Week Of', axis=alt.Axis(format='%b %d')),
+            y=alt.Y('count():Q', title='Permits Issued'),
+            color='city:N',
+            tooltip=['city', 'week', 'count()']
+        ).properties(height=300).interactive()
+        st.altair_chart(line_vol, use_container_width=True)
+
+with col_vel:
+    st.subheader("🐢 Weekly Velocity (Speed)")
     chart_df = df.dropna(subset=['issue_date', 'velocity'])
     chart_df = chart_df[chart_df['velocity'] >= 0]
     
     if not chart_df.empty:
-        # WEEKLY GROUPING
         chart_df['week'] = chart_df['issue_date'].dt.to_period('W').apply(lambda r: r.start_time)
-        
-        line = alt.Chart(chart_df).mark_line(point=True).encode(
+        line_vel = alt.Chart(chart_df).mark_line(point=True).encode(
             x=alt.X('week:T', title='Week Of', axis=alt.Axis(format='%b %d')),
             y=alt.Y('median(velocity):Q', title='Median Days'),
             color='city:N',
-            tooltip=['city', 'week', 'median(velocity)', 'count()']
-        ).properties(height=350).interactive()
-        st.altair_chart(line, use_container_width=True)
+            tooltip=['city', 'week', 'median(velocity)']
+        ).properties(height=300).interactive()
+        st.altair_chart(line_vel, use_container_width=True)
     else:
-        st.info("No velocity data available.")
-
-with c_right:
-    st.subheader("🏷️ Tier Breakdown")
-    bar = alt.Chart(df).mark_arc(innerRadius=50).encode(
-        theta=alt.Theta("count():Q"),
-        color=alt.Color("complexity_tier:N"),
-        tooltip=["complexity_tier", "count()"]
-    ).properties(height=350)
-    st.altair_chart(bar, use_container_width=True)
+        st.info("No velocity data. (Requires Applied Date)")
 
 # DATA TABLE
 st.subheader("📋 Recent Permit Manifest")
