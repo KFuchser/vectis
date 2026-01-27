@@ -3,7 +3,6 @@ Ingestion spoke for Fort Worth, TX.
 Robust date handling to ensure Velocity metrics populate.
 """
 import requests
-import pandas as pd
 from datetime import datetime
 from service_models import PermitRecord, ComplexityTier
 
@@ -12,10 +11,10 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
     
     url = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
     
-    # Check all fields to avoid missing dates
+    # Fetch ALL fields to ensure we don't miss the date column
     params = {
         "where": f"Status_Date >= '{cutoff_date} 00:00:00'",
-        "outFields": "*", # Fetch ALL fields to be safe
+        "outFields": "*", 
         "outSR": "4326",
         "f": "json",
         "resultRecordCount": 2000, 
@@ -34,9 +33,10 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
         raw_records = [f["attributes"] for f in data["features"]]
         mapped_records = []
         
+        # Current time for sanity checking
+        now_ts = datetime.now().timestamp()
+        
         for r in raw_records:
-            # --- ROBUST GETTER ---
-            # Checks Applied_Date, APPLIED_DATE, applied_date
             def get_val(key_list):
                 for k in key_list:
                     if k in r: return r[k]
@@ -46,14 +46,23 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
 
             def parse_date(ms):
                 try:
-                    if ms: return datetime.fromtimestamp(ms / 1000.0).strftime('%Y-%m-%d')
+                    if ms: 
+                        # SANITY CHECK: Ignore dates more than 7 days in the future
+                        # This fixes the "2026-08-13" expiration date bug
+                        if (ms / 1000.0) > (now_ts + 7 * 86400):
+                            return None
+                        return datetime.fromtimestamp(ms / 1000.0).strftime('%Y-%m-%d')
                 except: pass
                 return None
 
+            # Handle Dates with robustness
             issued_iso = parse_date(get_val(['Status_Date', 'STATUS_DATE']))
-            # Try multiple casing variations for Applied Date
             applied_val = get_val(['Applied_Date', 'APPLIED_DATE', 'applied_date'])
             applied_iso = parse_date(applied_val)
+            
+            # If issued date was filtered out because it was in the future, skip record
+            if not issued_iso and get_val(['Status_Date', 'STATUS_DATE']):
+                continue
 
             desc = get_val(['B1_WORK_DESC', 'B1_Work_Desc']) or get_val(['Permit_Type']) or "Unspecified"
             val = float(get_val(['JobValue', 'JOBVALUE']) or 0.0)

@@ -2,9 +2,11 @@ import streamlit as st
 import pandas as pd
 import altair as alt
 from supabase import create_client, Client
+from datetime import datetime
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
+# --- 1. STYLING ---
 st.markdown("""
     <style>
     .stApp { background-color: #F8F9FA; }
@@ -19,6 +21,7 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+# --- 2. DATA LOADING (FIXED) ---
 @st.cache_data(ttl=600)
 def load_data():
     try:
@@ -26,22 +29,34 @@ def load_data():
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # INCREASED LIMIT FOR 90 DAYS
+        # CRITICAL FIX 1: Use .range(0, 5000) to break the 1000-row default limit
         response = supabase.table('permits')\
             .select("*")\
             .order('issued_date', desc=True)\
-            .limit(50000)\
+            .range(0, 5000)\
             .execute()
-        
+            
         df = pd.DataFrame(response.data)
+        
         if not df.empty:
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
+            
+            # CRITICAL FIX 2: Filter out FUTURE dates (Time Travel Bug)
+            # This prevents dates like '2026-08-13' from ruining the chart scale
+            now = pd.Timestamp.now()
+            df = df[df['issue_date'] <= now]
+            
+            # Calculate Velocity
             df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
+            
         return df
-    except: return pd.DataFrame()
+    except Exception as e:
+        return pd.DataFrame()
 
+# --- SIDEBAR ---
 st.sidebar.title("Vectis Command")
+
 if st.sidebar.button("🔄 Force Refresh"):
     st.cache_data.clear()
     st.rerun()
@@ -64,7 +79,8 @@ if not df_raw.empty:
 else:
     df = pd.DataFrame()
 
-st.title("🏛️ National Regulatory Friction Index (90-Day View)")
+# --- MAIN DASHBOARD ---
+st.title("🏛️ National Regulatory Friction Index")
 
 if df.empty:
     st.warning("No records found.")
@@ -75,7 +91,7 @@ real_projects = df[df['velocity'] >= 0]
 median_vel = real_projects['velocity'].median() if not real_projects.empty else 0
 
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Volume", len(df))
+c1.metric("Total Volume", len(df)) # Should now exceed 1000
 c2.metric("Median Lead Time", f"{median_vel:.0f} Days")
 c3.metric("Pipeline Value", f"${df['valuation'].sum()/1e6:.1f}M")
 c4.metric("High Friction (>180d)", len(df[df['velocity'] > 180]))
@@ -91,7 +107,7 @@ with c_left:
     chart_df = chart_df[chart_df['velocity'] >= 0]
     
     if not chart_df.empty:
-        # WEEKLY GROUPING
+        # Weekly Grouping
         chart_df['week'] = chart_df['issue_date'].dt.to_period('W').apply(lambda r: r.start_time)
         
         line = alt.Chart(chart_df).mark_line(point=True).encode(
