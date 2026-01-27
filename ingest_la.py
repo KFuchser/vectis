@@ -1,23 +1,20 @@
 """
 Ingestion spoke for Los Angeles, CA.
-Connects to the City of Los Angeles' Socrata open data portal (LADBS) to fetch recently issued building permits.
+SCHEMA LOCK: Maps 'submit_date' -> 'applied_date'.
 """
-import os
 import requests
-from service_models import PermitRecord
-from datetime import datetime
+from service_models import PermitRecord, ComplexityTier
 
-def get_la_data(threshold, socrata_token=None):
-    # ENDPOINT: Building and Safety - Permits Issued (pi9x-tg5x)
+def get_la_data(cutoff_date, socrata_token=None):
+    print(f"🤠 Fetching LA data since {cutoff_date}...")
+    
+    # LA Building and Safety - Permits Issued (pi9x-tg5x)
     LA_ENDPOINT = "https://data.lacity.org/resource/pi9x-tg5x.json"
     
-    # SOCRATA QUERY
-    # We fetch 'submit_date' (if avail) or 'status_date' to try and get a start time
-    # Note: L.A. 'pi9x-tg5x' dataset is specifically "Issued" permits.
-    # We try to grab 'submit_date' which is often hidden in these datasets.
+    # We explicitly request submit_date
     query = (
-        f"$select=permit_nbr,issue_date,status_date,valuation,work_desc,status_desc"
-        f"&$where=issue_date >= '{threshold}'"
+        f"$select=permit_nbr,issue_date,submit_date,valuation,work_desc,status_desc"
+        f"&$where=issue_date >= '{cutoff_date}T00:00:00'"
         f"&$limit=2000"
         f"&$order=issue_date DESC"
     )
@@ -29,37 +26,37 @@ def get_la_data(threshold, socrata_token=None):
     try:
         resp = requests.get(f"{LA_ENDPOINT}?{query}", headers=headers, timeout=20)
         if resp.status_code != 200: 
-            print(f"⚠️ LA API Error: {resp.status_code}")
             return []
             
         data = resp.json()
         records = []
         
         for r in data:
-            # FIX 1: Do NOT set applied_date to issue_date. 
-            # Leave it None if missing so the Quality Lock can handle it.
-            # L.A. sometimes exposes 'submit_date' or we can infer from 'status_date' if status was 'Submitted'
-            applied = r.get("submit_date") # Try to get real start date
+            def parse_date(d):
+                return d.split("T")[0] if d else None
+
+            # --- MAPPING LOCK ---
+            applied = parse_date(r.get("submit_date"))
+            issued = parse_date(r.get("issue_date"))
             
-            # Formatting Valuation
             val_raw = r.get("valuation", "0")
-            try:
-                val = float(val_raw)
-            except:
-                val = 0.0
+            try: val = float(val_raw)
+            except: val = 0.0
 
             records.append(PermitRecord(
                 permit_id=r.get("permit_nbr"),
                 city="Los Angeles",
-                applied_date=applied, # Can be None!
-                issued_date=r.get("issue_date"),
+                applied_date=applied, # Often null, but correct field
+                issued_date=issued,
                 valuation=val,
                 description=r.get("work_desc", "No Description"),
-                status=r.get("status_desc", "Issued")
+                status=r.get("status_desc", "Issued"),
+                complexity_tier=ComplexityTier.UNKNOWN
             ))
             
+        print(f"✅ Los Angeles: Retrieved {len(records)} records.")
         return records
-
+        
     except Exception as e:
-        print(f"❌ LA Ingest Failed: {e}")
+        print(f"❌ LA API Error: {e}")
         return []
