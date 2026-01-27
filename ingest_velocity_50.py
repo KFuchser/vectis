@@ -1,9 +1,8 @@
 """
-Vectis Ingestion Orchestrator - DIAGNOSTIC MODE
-Fixes:
-1. Regex JSON Parsing: Extracts [...] from messy AI responses.
-2. Verbose Logging: PRINTS the AI's response so we can verify it works.
-3. Robust ID Matching: Handles string/int ID mismatches.
+Vectis Ingestion Orchestrator - 90 DAY / WEEKLY VIEW
+Changes:
+1. Cutoff: 90 Days (Quarterly Data).
+2. AI: Gemini 2.0 Flash + Regex Parser (Production Stable).
 """
 import os
 import json
@@ -33,18 +32,11 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_KEY)
 
 def extract_json_from_text(text: str):
-    """
-    Robustly finds a JSON list [...] inside any text using Regex.
-    """
     try:
-        # Look for content between [ and ]
         match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-        # Fallback: Try straight load
+        if match: return json.loads(match.group())
         return json.loads(text)
-    except Exception:
-        return []
+    except Exception: return []
 
 def process_and_classify_permits(records: List[PermitRecord]):
     if not records: return []
@@ -81,7 +73,7 @@ def process_and_classify_permits(records: List[PermitRecord]):
         else:
             to_classify.append(r)
 
-    # 4. AI CLASSIFICATION (Gemini 2.0 Flash)
+    # 4. AI CLASSIFICATION
     if to_classify:
         print(f"🧠 Sending {len(to_classify)} records to Gemini (2.0 Flash)...")
         chunk_size = 30
@@ -89,11 +81,10 @@ def process_and_classify_permits(records: List[PermitRecord]):
         for i in range(0, len(to_classify), chunk_size):
             chunk = to_classify[i:i + chunk_size]
             
-            # Detailed Prompt to force clean JSON
             batch_prompt = """
             Role: Civil Engineering classifier.
             Task: Classify these permits into: 'Commercial', 'Residential', 'Commodity'.
-            Output: A pure JSON list of objects. No markdown. No intro text.
+            Output: A pure JSON list of objects. No markdown.
             Format: [{"id": 0, "tier": "Commercial", "category": "Retail", "rationale": "..."}]
             
             INPUT DATA:
@@ -108,39 +99,23 @@ def process_and_classify_permits(records: List[PermitRecord]):
                     config=types.GenerateContentConfig(response_mime_type="application/json")
                 )
                 
-                # --- DEBUG: Print the first response to verify it works ---
-                if i == 0:
-                    print(f"🔎 DEBUG AI RESPONSE SAMPLE:\n{response.text[:200]}...\n")
-
-                # --- ROBUST PARSING ---
                 raw_json = extract_json_from_text(response.text)
-                
-                if not raw_json and i == 0:
-                    print("⚠️ WARNING: JSON Extraction failed for first batch.")
 
-                # Apply Updates
                 for item in raw_json:
                     try:
-                        # Handle string/int ID mismatch
                         record_idx = int(str(item.get("id")))
                         if 0 <= record_idx < len(chunk):
-                            target_record = chunk[record_idx]
-                            
+                            target = chunk[record_idx]
                             tier_str = str(item.get("tier", "Unknown")).upper()
-                            if "COMMERCIAL" in tier_str:
-                                target_record.complexity_tier = ComplexityTier.COMMERCIAL
-                            elif "RESIDENTIAL" in tier_str:
-                                target_record.complexity_tier = ComplexityTier.RESIDENTIAL
-                            elif "COMMODITY" in tier_str:
-                                target_record.complexity_tier = ComplexityTier.COMMODITY
-                            else:
-                                target_record.complexity_tier = ComplexityTier.UNKNOWN
-                                
-                            target_record.project_category = ProjectCategory.UNKNOWN 
-                            target_record.ai_rationale = item.get("rationale", "AI Classified")
-                    except Exception:
-                        continue
-                        
+                            
+                            if "COMMERCIAL" in tier_str: target.complexity_tier = ComplexityTier.COMMERCIAL
+                            elif "RESIDENTIAL" in tier_str: target.complexity_tier = ComplexityTier.RESIDENTIAL
+                            elif "COMMODITY" in tier_str: target.complexity_tier = ComplexityTier.COMMODITY
+                            else: target.complexity_tier = ComplexityTier.UNKNOWN
+                            
+                            target.project_category = ProjectCategory.UNKNOWN 
+                            target.ai_rationale = item.get("rationale", "AI Classified")
+                    except Exception: continue
             except Exception as e:
                 print(f"❌ AI Batch Error: {e}") 
                 pass
@@ -148,45 +123,34 @@ def process_and_classify_permits(records: List[PermitRecord]):
     return processed_records + to_classify
 
 def main():
-    cutoff = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    # --- 90 DAY CONFIGURATION ---
+    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    print(f"📅 Fetching Data Since: {cutoff} (90 Days)")
+    
     all_data = []
 
-    print("🛰️ Fetching Austin...")
-    try:
-        all_data.extend(get_austin_data(SOCRATA_TOKEN, cutoff))
-    except Exception as e:
-        print(f"⚠️ Austin Failed: {e}")
+    try: all_data.extend(get_austin_data(SOCRATA_TOKEN, cutoff))
+    except: print("⚠️ Austin Failed")
 
-    print("🛰️ Fetching San Antonio...")
     all_data.extend(get_san_antonio_data(cutoff))
-    
-    print("🛰️ Fetching Fort Worth...")
     all_data.extend(get_fort_worth_data(cutoff))
     
-    print("🛰️ Fetching Los Angeles...")
-    try:
-        all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
-    except Exception as e:
-        print(f"⚠️ LA Failed: {e}")
+    try: all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
+    except: print("⚠️ LA Failed")
 
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
     
-    # Deduplication
     unique_batch: Dict[str, dict] = {}
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
-        r_dict = r.model_dump(mode='json', exclude={'latitude', 'longitude'})
-        unique_batch[key] = r_dict
+        unique_batch[key] = r.model_dump(mode='json', exclude={'latitude', 'longitude'})
 
     data_to_upsert = list(unique_batch.values())
 
     if data_to_upsert:
         try:
-            response = supabase.table("permits").upsert(
-                data_to_upsert, 
-                on_conflict="city, permit_id"
-            ).execute()
+            supabase.table("permits").upsert(data_to_upsert, on_conflict="city, permit_id").execute()
             print(f"✅ SUCCESS: Ingested {len(data_to_upsert)} records.")
         except Exception as e:
             print(f"❌ Database Upload Failed: {e}")
