@@ -1,9 +1,6 @@
 """
 Ingestion spoke for Los Angeles, CA.
-VERIFIED SCHEMA:
-- 'submit_date' DOES NOT EXIST in this dataset.
-- Velocity calculation is impossible. 
-- Ingestion restricted to Volume & Valuation.
+FIX: Increased timeout to 60s to prevent 'Read timed out' errors.
 """
 import requests
 from service_models import PermitRecord, ComplexityTier
@@ -13,7 +10,6 @@ def get_la_data(cutoff_date, socrata_token=None):
     
     LA_ENDPOINT = "https://data.lacity.org/resource/pi9x-tg5x.json"
     
-    # We remove 'submit_date' from the query as it causes 400 errors or returns nothing
     query = (
         f"$select=permit_nbr,issue_date,valuation,work_desc,status_desc"
         f"&$where=issue_date >= '{cutoff_date}T00:00:00'"
@@ -26,7 +22,8 @@ def get_la_data(cutoff_date, socrata_token=None):
         headers["X-App-Token"] = socrata_token
         
     try:
-        resp = requests.get(f"{LA_ENDPOINT}?{query}", headers=headers, timeout=20)
+        # INCREASED TIMEOUT TO 60 SECONDS
+        resp = requests.get(f"{LA_ENDPOINT}?{query}", headers=headers, timeout=60)
         if resp.status_code != 200: 
             print(f"❌ LA API Error: {resp.status_code}")
             return []
@@ -38,8 +35,6 @@ def get_la_data(cutoff_date, socrata_token=None):
             def parse_date(d):
                 return d.split("T")[0] if d else None
 
-            # --- MAPPING LOCK ---
-            # applied_date is forced to None because the source has no data
             applied = None 
             issued = parse_date(r.get("issue_date"))
             

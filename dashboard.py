@@ -26,7 +26,6 @@ def load_data():
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # Limit set to 50k to ensure we capture everything
         response = supabase.table('permits')\
             .select("*")\
             .order('issued_date', desc=True)\
@@ -38,11 +37,8 @@ def load_data():
         if not df.empty:
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
-            
-            # Timezone cleanup
             df['issue_date'] = df['issue_date'].dt.tz_localize(None)
             
-            # FUTURE DATE GUARD
             now = pd.Timestamp.now() + pd.Timedelta(days=1)
             df = df[df['issue_date'] <= now]
 
@@ -58,10 +54,9 @@ if st.sidebar.button("🔄 Force Refresh"):
 
 df_raw = load_data()
 
-# --- DEBUG SECTION: DATABASE TRUTH TABLE ---
+# --- TRUTH TABLE ---
 if not df_raw.empty:
     st.write("🔎 **Database Content Verification:**")
-    # This table shows RAW counts from the database, ignoring all filters
     counts = df_raw['city'].value_counts().reset_index()
     counts.columns = ['City', 'Record Count']
     st.dataframe(counts, use_container_width=True, hide_index=True)
@@ -101,6 +96,7 @@ c4.metric("High Friction (>180d)", len(df[df['velocity'] > 180]))
 st.divider()
 
 # CHARTS
+st.caption("💡 *Tip: Click and drag charts to pan. Use mouse wheel to zoom.*")
 col_vol, col_vel = st.columns(2)
 
 with col_vol:
@@ -112,7 +108,7 @@ with col_vol:
             y=alt.Y('count():Q', title='Permits Issued'),
             color='city:N',
             tooltip=['city', 'week', 'count()']
-        ).properties(height=300).interactive()
+        ).properties(height=300).interactive(bind_y=False) # Allow X-axis zoom only
         st.altair_chart(line_vol, use_container_width=True)
 
 with col_vel:
@@ -127,16 +123,14 @@ with col_vel:
             y=alt.Y('median(velocity):Q', title='Median Days'),
             color='city:N',
             tooltip=['city', 'week', 'median(velocity)']
-        ).properties(height=300).interactive()
+        ).properties(height=300).interactive(bind_y=False)
         st.altair_chart(line_vel, use_container_width=True)
     else:
         st.info("No velocity data yet.")
 
 st.divider()
 
-# PIE CHART & TABLE
 c_pie, c_table = st.columns([1, 2])
-
 with c_pie:
     st.subheader("🏷️ Permit Mix")
     base = alt.Chart(df).encode(theta=alt.Theta("count():Q", stack=True))

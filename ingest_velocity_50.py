@@ -1,6 +1,6 @@
 """
 Vectis Ingestion Orchestrator - PRODUCTION
-FIX: Implements CHUNKED UPLOADS to bypass Supabase payload limits.
+FIX: Reduced Batch Size (200) to prevent Supabase timeouts.
 """
 import os
 import json
@@ -42,7 +42,6 @@ def process_and_classify_permits(records: List[PermitRecord]):
     processed_records = []
     to_classify = []
     
-    # Quick Filters to save AI tokens
     commodity_noise = ["pool", "spa", "sign", "fence", "roof", "siding", "demolition", "irrigation", "solar", "driveway"]
     res_keywords = ["single family", "sfh", "detached", "duplex", "townhouse", "garage", "adu"]
 
@@ -64,7 +63,6 @@ def process_and_classify_permits(records: List[PermitRecord]):
         else:
             to_classify.append(r)
 
-    # AI Classification Batching
     if to_classify:
         print(f"🧠 Sending {len(to_classify)} records to Gemini (2.0 Flash)...")
         chunk_size = 30
@@ -106,19 +104,19 @@ def process_and_classify_permits(records: List[PermitRecord]):
 
     return processed_records + to_classify
 
-def batch_upsert(data: List[dict], batch_size: int = 1000):
-    """Chunks data to avoid Supabase payload limits"""
+def batch_upsert(data: List[dict], batch_size: int = 200):
+    """Chunks data into smaller batches (200) to ensure Supabase accepts them."""
     total = len(data)
-    print(f"📦 Uploading {total} records in batches of {batch_size}...")
+    print(f"📦 Uploading {total} records in safe batches of {batch_size}...")
     
     for i in range(0, total, batch_size):
         batch = data[i:i + batch_size]
         try:
             supabase.table("permits").upsert(batch, on_conflict="city, permit_id").execute()
-            print(f"   ↳ Uploaded records {i+1} to {min(i+batch_size, total)}")
-            time.sleep(0.5) # Be nice to the API
+            print(f"   ↳ ✅ Batch {i//batch_size + 1}: Saved records {i+1} to {min(i+batch_size, total)}")
         except Exception as e:
-            print(f"❌ Batch Upload Failed (Rows {i}-{i+batch_size}): {e}")
+            print(f"   ❌ Batch Failed (Rows {i}-{i+batch_size}): {e}")
+        time.sleep(0.2) 
 
 def main():
     cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
@@ -126,26 +124,21 @@ def main():
     
     all_data = []
     
-    # 1. Austin
     try: all_data.extend(get_austin_data(SOCRATA_TOKEN, cutoff))
     except Exception as e: print(f"⚠️ Austin Failed: {e}")
 
-    # 2. San Antonio (The Problem Child)
     try: all_data.extend(get_san_antonio_data(cutoff))
     except Exception as e: print(f"⚠️ San Antonio Failed: {e}")
 
-    # 3. Fort Worth
     try: all_data.extend(get_fort_worth_data(cutoff))
     except Exception as e: print(f"⚠️ Fort Worth Failed: {e}")
     
-    # 4. Los Angeles
     try: all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
     except Exception as e: print(f"⚠️ LA Failed: {e}")
 
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
     
-    # Deduplicate in memory before upload
     unique_batch: Dict[str, dict] = {}
     for r in final_records:
         key = f"{r.city}_{r.permit_id}"
@@ -154,7 +147,6 @@ def main():
     data_to_upsert = list(unique_batch.values())
     
     if data_to_upsert:
-        # CRITICAL FIX: Use chunked upload
         batch_upsert(data_to_upsert)
         print("✅ ORCHESTRATION COMPLETE.")
     else:
