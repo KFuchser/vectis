@@ -5,6 +5,7 @@ from supabase import create_client, Client
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
+# --- 1. STYLING ---
 st.markdown("""
     <style>
     .stApp { background-color: #F8F9FA; }
@@ -26,7 +27,7 @@ def load_data():
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # 1. FETCH ENOUGH DATA (50k limit)
+        # Fetch 50,000 to see everything
         response = supabase.table('permits')\
             .select("*")\
             .order('issued_date', desc=True)\
@@ -39,14 +40,14 @@ def load_data():
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
             
-            # 2. TIME GUARD (The Fix for Squished Charts)
-            # Remove any records with dates in the future
+            # TIME GUARD: Remove Future Dates
+            df['issue_date'] = df['issue_date'].dt.tz_localize(None)
             now = pd.Timestamp.now() + pd.Timedelta(days=1)
             df = df[df['issue_date'] <= now]
-            
+
             df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
         return df
-    except Exception:
+    except Exception as e:
         return pd.DataFrame()
 
 st.sidebar.title("Vectis Command")
@@ -90,7 +91,7 @@ c4.metric("High Friction (>180d)", len(df[df['velocity'] > 180]))
 
 st.divider()
 
-# CHARTS
+# --- ROW 1: TRENDS (Volume & Velocity) ---
 col_vol, col_vel = st.columns(2)
 
 with col_vol:
@@ -120,13 +121,34 @@ with col_vel:
         ).properties(height=300).interactive()
         st.altair_chart(line_vel, use_container_width=True)
     else:
-        st.info("No velocity data. (Requires Applied Date)")
+        st.info("No velocity data yet.")
 
-# DATA TABLE
-st.subheader("📋 Recent Permit Manifest")
-st.dataframe(
-    df[['city', 'complexity_tier', 'valuation', 'velocity', 'description', 'issue_date']]
-    .sort_values('issue_date', ascending=False)
-    .head(100),
-    use_container_width=True
-)
+st.divider()
+
+# --- ROW 2: COMPOSITION (The Returned Pie Chart) ---
+c_pie, c_table = st.columns([1, 2])
+
+with c_pie:
+    st.subheader("🏷️ Permit Mix")
+    base = alt.Chart(df).encode(theta=alt.Theta("count():Q", stack=True))
+    pie = base.mark_arc(outerRadius=120, innerRadius=50).encode(
+        color=alt.Color("complexity_tier:N"),
+        order=alt.Order("complexity_tier", sort="ascending"),
+        tooltip=["complexity_tier", "count()"]
+    )
+    text = base.mark_text(radius=140).encode(
+        text="count():Q",
+        order=alt.Order("complexity_tier", sort="ascending"),
+        color=alt.value("black")
+    )
+    st.altair_chart(pie + text, use_container_width=True)
+
+with c_table:
+    st.subheader("📋 Recent Permit Manifest")
+    st.dataframe(
+        df[['city', 'complexity_tier', 'valuation', 'velocity', 'description', 'issue_date']]
+        .sort_values('issue_date', ascending=False)
+        .head(100),
+        use_container_width=True,
+        height=300
+    )
