@@ -1,14 +1,15 @@
 """
 Ingestion spoke for San Antonio, TX.
-LOGIC: Cloned from successful 'satest.py'.
+FIX: COMPOSITE ID (Permit # + System ID).
+Solves the "228 Duplicates" collision issue verified by diagnostics.
 """
 import requests
 from service_models import PermitRecord, ComplexityTier
 
 def get_san_antonio_data(cutoff_date: str) -> list[PermitRecord]:
-    print(f"🤠 Starting San Antonio Sync (satest.py Clone)...")
+    print(f"🤠 Starting San Antonio Sync (Composite ID Mode)...")
     
-    # EXACT URL and RESOURCE ID from satest.py
+    # RESOURCE ID: Permits Issued 2020-Present
     url = "https://data.sanantonio.gov/api/3/action/datastore_search"
     params = {
         "resource_id": "c21106f9-3ef5-4f3a-8604-f992b4db7512",
@@ -18,67 +19,55 @@ def get_san_antonio_data(cutoff_date: str) -> list[PermitRecord]:
 
     try:
         response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
         data = response.json()
         
         if not data.get("success"):
-            print(f"⚠️ San Antonio: API reported failure.")
             return []
 
         raw_records = data["result"]["records"]
-        print(f"   ↳ API Connection Successful. Downloaded {len(raw_records)} raw records.")
-
         mapped_records = []
         
-        # --- DEBUG: Print first record to confirm we see what satest.py saw ---
-        if raw_records:
-            first = raw_records[0]
-            print(f"   ↳ DEBUG SAMPLE: Issued='{first.get('DATE ISSUED')}', Applied='{first.get('DATE SUBMITTED')}'")
-        # ---------------------------------------------------------------------
-
         for r in raw_records:
-            # 1. DATE PARSING (Simple String Split)
             def parse_date(d_str):
-                if not d_str: return None
-                return str(d_str).split("T")[0]
+                return str(d_str).split("T")[0] if d_str else None
 
+            # DATES
             issued_iso = parse_date(r.get("DATE ISSUED"))
             applied_iso = parse_date(r.get("DATE SUBMITTED"))
 
-            # 2. FILTERING
-            if not issued_iso:
-                continue
-            if issued_iso < cutoff_date:
-                continue
+            if not issued_iso or issued_iso < cutoff_date: continue
 
-            # 3. VALUATION
+            # --- THE FIX: COMPOSITE ID ---
+            # Combines Permit Number + Internal ID to guarantee uniqueness
+            # Fixes the 228 duplicates you found in diagnostics
+            permit_no = str(r.get("PERMIT #", "UNKNOWN"))
+            internal_id = str(r.get("_id"))
+            
+            # Format: "PERMIT-NUM_SYSTEM-ID"
+            unique_pid = f"{permit_no}_{internal_id}"
+
+            # VALUATION (Handle messy currency strings)
             raw_val = r.get("DECLARED VALUATION")
             try:
-                if raw_val:
-                    val = float(str(raw_val).replace("$", "").replace(",", ""))
-                else:
-                    val = 0.0
+                val = float(str(raw_val).replace("$", "").replace(",", "")) if raw_val else 0.0
             except:
                 val = 0.0
 
-            # 4. DESCRIPTION
-            desc = r.get("PROJECT NAME") or r.get("WORK TYPE") or "Unspecified"
-
             record = PermitRecord(
-                permit_id=str(r.get("PERMIT #", "UNKNOWN")),
+                permit_id=unique_pid,
                 city="San Antonio",
                 status="Issued",
                 applied_date=applied_iso,
                 issued_date=issued_iso,
-                description=desc,
+                description=r.get("PROJECT NAME") or r.get("WORK TYPE") or "Unspecified",
                 valuation=val,
                 complexity_tier=ComplexityTier.UNKNOWN 
             )
             mapped_records.append(record)
         
-        print(f"✅ San Antonio: Filtered & Kept {len(mapped_records)} records (Cutoff: {cutoff_date}).")
+        print(f"✅ San Antonio: Processed {len(mapped_records)} unique records.")
         return mapped_records
 
     except Exception as e:
-        print(f"❌ San Antonio Integration Error: {e}")
+        print(f"❌ San Antonio Error: {e}")
         return []

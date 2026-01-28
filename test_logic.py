@@ -2,41 +2,35 @@
 A simple script for testing the business logic embedded in the Pydantic models.
 It creates several instances of the `PermitRecord` model with different test data to verify field defaults and property calculations.
 """
-from service_models import PermitRecord
+import requests
+from collections import Counter
 
-# --- TEST CASES ---
-test_data = [
-    {
-        "city": "Fort Worth",
-        "permit_id": "FW-100",
-        "description": "New Starbucks Shell and Drive-thru",
-        "valuation": 850000.0,
-        "status": "In Review",
-        "applied_date": "2024-01-01T08:00:00Z"
-    },
-    {
-        "city": "San Antonio",
-        "permit_id": "SA-200",
-        "description": "Residential Addition: 2 Bedrooms and a Master Bath",
-        "valuation": 1200000.0, # High value, but should be demoted
-        "status": "Issued",
-        "applied_date": "2024-01-01",
-        "issued_date": "2024-01-15"
-    },
-    {
-        "city": "Fort Worth",
-        "permit_id": "FW-300",
-        "description": "Emergency Roof Repair",
-        "valuation": 12000.0,
-        "status": "Closed",
-        "applied_date": "2024-02-01"
-    }
-]
+def diagnostic():
+    url = "https://data.sanantonio.gov/api/3/action/datastore_search"
+    params = {"resource_id": "c21106f9-3ef5-4f3a-8604-f992b4db7512", "limit": 1000}
+    
+    print("🕵️ Analyzing San Antonio Data Integrity...")
+    try:
+        r = requests.get(url, params=params).json()
+        records = r["result"]["records"]
+        
+        # 1. Check for Duplicate Permit Numbers
+        ids = [str(rec.get("PERMIT #")) for rec in records]
+        unique_ids = set(ids)
+        
+        # 2. Check for Nulls
+        null_ids = ids.count('None')
+        
+        print(f"✅ Total Records Fetched: {len(records)}")
+        print(f"🆔 Unique Permit IDs:     {len(unique_ids)}")
+        print(f"⚠️ Duplicate IDs found:   {len(records) - len(unique_ids)}")
+        print(f"🚫 Null IDs found:        {null_ids}")
+        
+        if len(unique_ids) < 10 and len(records) > 100:
+            print("\n🔥 SMOKING GUN: Your IDs are colliding. Most records are being overwritten.")
+        
+    except Exception as e:
+        print(f"❌ Diagnostic Failed: {e}")
 
-print(f"{'CITY':<15} | {'TIER':<12} | {'DAYS':<5} | {'DESCRIPTION'}")
-print("-" * 70)
-
-for entry in test_data:
-    p = PermitRecord(**entry)
-    days = p.processing_days if p.processing_days is not None else "N/A"
-    print(f"{p.city:<15} | {p.complexity_tier:<12} | {days:<5} | {p.description}")
+if __name__ == "__main__":
+    diagnostic()

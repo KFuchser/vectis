@@ -5,6 +5,7 @@ from supabase import create_client, Client
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
+# --- 1. STYLING ---
 st.markdown("""
     <style>
     .stApp { background-color: #F8F9FA; }
@@ -26,7 +27,7 @@ def load_data():
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # Limit set to 50k to ensure we capture everything
+        # Fetch 50,000 to see everything
         response = supabase.table('permits')\
             .select("*")\
             .order('issued_date', desc=True)\
@@ -39,16 +40,14 @@ def load_data():
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
             
-            # Timezone cleanup
+            # TIME GUARD: Remove Future Dates
             df['issue_date'] = df['issue_date'].dt.tz_localize(None)
-            
-            # FUTURE DATE GUARD
             now = pd.Timestamp.now() + pd.Timedelta(days=1)
             df = df[df['issue_date'] <= now]
 
             df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
         return df
-    except Exception:
+    except Exception as e:
         return pd.DataFrame()
 
 st.sidebar.title("Vectis Command")
@@ -57,14 +56,6 @@ if st.sidebar.button("🔄 Force Refresh"):
     st.rerun()
 
 df_raw = load_data()
-
-# --- DEBUG SECTION: DATABASE TRUTH TABLE ---
-if not df_raw.empty:
-    st.write("🔎 **Database Content Verification:**")
-    # This table shows RAW counts from the database, ignoring all filters
-    counts = df_raw['city'].value_counts().reset_index()
-    counts.columns = ['City', 'Record Count']
-    st.dataframe(counts, use_container_width=True, hide_index=True)
 
 # FILTERS
 min_val = st.sidebar.slider("Valuation Floor ($)", 0, 1000000, 0, step=10000)
@@ -100,7 +91,7 @@ c4.metric("High Friction (>180d)", len(df[df['velocity'] > 180]))
 
 st.divider()
 
-# CHARTS
+# --- ROW 1: TRENDS (Volume & Velocity) ---
 col_vol, col_vel = st.columns(2)
 
 with col_vol:
@@ -134,7 +125,7 @@ with col_vel:
 
 st.divider()
 
-# PIE CHART & TABLE
+# --- ROW 2: COMPOSITION (The Returned Pie Chart) ---
 c_pie, c_table = st.columns([1, 2])
 
 with c_pie:
@@ -145,7 +136,12 @@ with c_pie:
         order=alt.Order("complexity_tier", sort="ascending"),
         tooltip=["complexity_tier", "count()"]
     )
-    st.altair_chart(pie, use_container_width=True)
+    text = base.mark_text(radius=140).encode(
+        text="count():Q",
+        order=alt.Order("complexity_tier", sort="ascending"),
+        color=alt.value("black")
+    )
+    st.altair_chart(pie + text, use_container_width=True)
 
 with c_table:
     st.subheader("📋 Recent Permit Manifest")
