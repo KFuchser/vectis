@@ -1,6 +1,17 @@
 """
 Vectis Ingestion Orchestrator - PRODUCTION
-FIX: Reduced Batch Size (200) to prevent Supabase timeouts.
+
+This script serves as the central entry point for the data pipeline.
+It performs the following high-level operations:
+1. Fetches permit data from all configured city "spokes" (Austin, San Antonio, Fort Worth, LA).
+2. Normalizes the data into a common `PermitRecord` format.
+3. Applies AI-based classification (Gemini 2.0 Flash) to categorize permits (Residential vs Commercial)
+   based on description and valuation.
+4. Uploads the cleaned data to Supabase in safe batches to avoid timeouts.
+
+Key Configuration:
+- Batch Size: 200 records (Strict limit for Supabase stability).
+- Lookback Period: 90 days (configurable via `timedelta`).
 """
 import os
 import json
@@ -18,6 +29,7 @@ from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
 from ingest_la import get_la_data
+from ingest_phoenix import get_phoenix_data
 
 load_dotenv()
 
@@ -31,6 +43,15 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_KEY)
 
 def extract_json_from_text(text: str):
+    """
+    Extracts a JSON object from a string that may contain other text.
+
+    Args:
+        text: The string to search for a JSON object.
+
+    Returns:
+        A list or dictionary parsed from the JSON, or an empty list if no valid JSON is found.
+    """
     try:
         match = re.search(r'\[.*\]', text, re.DOTALL)
         if match: return json.loads(match.group())
@@ -38,15 +59,34 @@ def extract_json_from_text(text: str):
     except Exception: return []
 
 def process_and_classify_permits(records: List[PermitRecord]):
+    """
+    Classifies permits into Residential, Commercial, or Commodity tiers.
+
+    This function uses a hybrid approach:
+    1.  A keyword-based pre-filter for obvious high-volume, low-value permits (e.g., "pool", "roof").
+    2.  A call to a Gemini 2.0 Flash model for more nuanced classification of the remaining records.
+
+    Args:
+        records: A list of `PermitRecord` objects to be classified.
+
+    Returns:
+        A list of `PermitRecord` objects with the `complexity_tier` and `project_category` fields populated.
+    """
     if not records: return []
     processed_records = []
     to_classify = []
     
+    # These keywords represent common, low-value permits that can be automatically classified
+    # as "Commodity" to reduce the number of expensive AI calls.
     commodity_noise = ["pool", "spa", "sign", "fence", "roof", "siding", "demolition", "irrigation", "solar", "driveway"]
+    
+    # These keywords are strong indicators of residential projects.
     res_keywords = ["single family", "sfh", "detached", "duplex", "townhouse", "garage", "adu"]
 
     for r in records:
         desc_clean = (r.description or "").lower()
+        # Valuation threshold of $25,000 is a heuristic to separate high-value projects
+        # that require AI classification from lower-value ones.
         if r.valuation >= 25000:
             to_classify.append(r)
             continue
@@ -68,6 +108,11 @@ def process_and_classify_permits(records: List[PermitRecord]):
         chunk_size = 30
         for i in range(0, len(to_classify), chunk_size):
             chunk = to_classify[i:i + chunk_size]
+            # This prompt is carefully engineered for the Gemini 2.0 Flash model.
+            # - "Role: Civil Engineering classifier." sets the context for the model.
+            # - "Task: Classify these permits..." clearly defines the goal.
+            # - "Output: A pure JSON list of objects. No markdown." ensures a machine-readable response.
+            # - The format string provides a few-shot example to guide the model's output.
             batch_prompt = """
             Role: Civil Engineering classifier.
             Task: Classify these permits into: 'Commercial', 'Residential', 'Commodity'.
@@ -105,7 +150,13 @@ def process_and_classify_permits(records: List[PermitRecord]):
     return processed_records + to_classify
 
 def batch_upsert(data: List[dict], batch_size: int = 200):
-    """Chunks data into smaller batches (200) to ensure Supabase accepts them."""
+    """
+    Chunks data into smaller batches to ensure Supabase accepts them.
+
+    Args:
+        data: A list of dictionaries to upload to Supabase.
+        batch_size: The number of records to include in each batch. Defaults to 200.
+    """
     total = len(data)
     print(f"📦 Uploading {total} records in safe batches of {batch_size}...")
     
@@ -119,6 +170,11 @@ def batch_upsert(data: List[dict], batch_size: int = 200):
         time.sleep(0.2) 
 
 def main():
+    """
+    The main entry point for the ingestion script.
+
+    This function orchestrates the fetching, processing, and uploading of permit data.
+    """
     cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
     print(f"📅 Fetching Data Since: {cutoff} (90 Days)")
     
@@ -135,6 +191,9 @@ def main():
     
     try: all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
     except Exception as e: print(f"⚠️ LA Failed: {e}")
+
+    try: all_data.extend(get_phoenix_data(cutoff))
+    except Exception as e: print(f"⚠️ Phoenix Failed: {e}")
 
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)

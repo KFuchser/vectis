@@ -1,3 +1,17 @@
+"""
+Vectis Command Console - Streamlit Dashboard
+
+This application visualizes the building permit data stored in Supabase.
+It provides:
+- Real-time metrics on volume, velocity (lead time), and pipeline value.
+- Interactive charts for weekly trends.
+- Filtering by city, valuation, and complexity tier.
+
+Key Technical Features:
+- Pagination Loop: Overcomes Supabase's 1000-row default limit to fetch the full dataset.
+- Time Guard: Filters out future dates (common in Fort Worth data).
+- Velocity Calculation: Computes days between Application and Issuance.
+"""
 import streamlit as st
 import pandas as pd
 import altair as alt
@@ -23,12 +37,26 @@ st.markdown("""
 
 @st.cache_data(ttl=600)
 def load_data():
+    """
+    Loads permit data from the Supabase database, processes it, and caches the result.
+
+    This function performs several key operations:
+    1.  Fetches all records from the 'permits' table using a pagination loop to overcome the 1000-row limit.
+    2.  Converts date columns to datetime objects.
+    3.  Filters out future-dated permits (a data quality issue specific to Fort Worth).
+    4.  Calculates the 'velocity' (lead time) in days between application and issuance.
+
+    Returns:
+        A pandas DataFrame containing the processed permit data, or an empty DataFrame if an error occurs.
+    """
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
         
-        # --- PAGINATION LOOP: THE "1000 LIMIT" FIX ---
+        # --- PAGINATION LOOP ---
+        # Supabase has a hard limit of 1000 rows per request. This loop fetches all records
+        # by making repeated calls and incrementing the offset.
         all_records = []
         chunk_size = 1000 
         offset = 0
@@ -51,12 +79,12 @@ def load_data():
             # Update progress bar (visual feedback)
             my_bar.progress(min(len(all_records) / 12000, 1.0), text=f"Fetched {len(all_records)} records...")
             
-            # If we got less than the chunk size, we reached the end
+            # If we received fewer records than the chunk size, we've reached the end of the data.
             if len(data) < chunk_size:
                 break
                 
             offset += chunk_size
-            time.sleep(0.1) # Be nice to the API
+            time.sleep(0.1) # Be a good citizen and don't hammer the API.
 
         my_bar.empty() # Clear progress bar
             
@@ -66,16 +94,18 @@ def load_data():
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
             
-            # 1. TIMEZONE CLEANUP
+            # --- Data Processing ---
+
+            # Timezone information is not used in this dashboard and can cause issues with date comparisons.
             if df['issue_date'].dt.tz is not None:
                 df['issue_date'] = df['issue_date'].dt.tz_localize(None)
             
-            # 2. TIME GUARD (Filter out the Fort Worth "Future" dates)
-            # We filter locally, but since we fetched EVERYTHING, San Antonio is safely included
+            # CRITICAL: The Fort Worth API often includes permits with future expiration dates in the
+            # `issued_date` field. This "Time Guard" filters them out to prevent chart distortion.
             now = pd.Timestamp.now() + pd.Timedelta(days=1)
             df = df[df['issue_date'] <= now]
 
-            # 3. VELOCITY CALCULATION
+            # Calculate the "velocity" or "lead time" of a permit in days.
             df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
             
         return df

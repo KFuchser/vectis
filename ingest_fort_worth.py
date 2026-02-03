@@ -1,19 +1,31 @@
 """
-Ingestion spoke for Fort Worth, TX.
-SCHEMA LOCK: Robustly hunts for 'Applied_Date'.
-"""
-"""
-Ingestion spoke for Fort Worth, TX.
-VERIFIED SCHEMA (2026-01-27):
-- Applied Date: 'File_Date' (Found via satest.py)
-- Issued Date: 'Status_Date'
-- Future Date Handling: Dashboard will filter > Now.
+Ingestion spoke for Fort Worth, TX (ArcGIS API).
+
+This module handles fetching and normalizing building permit data from the City of Fort Worth.
+Endpoint: ArcGIS FeatureServer
+
+Key Logic:
+- Date Parsing: Converts ArcGIS Unix timestamps (milliseconds) to ISO dates.
+- Field Mapping:
+  - `File_Date` -> Applied Date
+  - `Status_Date` -> Issued Date
+- Note: Fort Worth often publishes expiration dates in `Status_Date` that are in the future.
+  These are handled downstream in the dashboard via the "Time Guard".
 """
 import requests
 from datetime import datetime
 from service_models import PermitRecord, ComplexityTier
 
 def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
+    """
+    Fetches and normalizes building permit data from the City of Fort Worth's ArcGIS API.
+
+    Args:
+        cutoff_date: The earliest date for which to fetch permits, in 'YYYY-MM-DD' format.
+
+    Returns:
+        A list of `PermitRecord` objects, or an empty list if an error occurs.
+    """
     print(f"🤠 Starting Fort Worth Sync (Schema Verified)...")
     
     url = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
@@ -40,24 +52,27 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
         mapped_records = []
         
         for r in raw_records:
-            # 1. PARSE DATES (ArcGIS uses Unix Timestamps in milliseconds)
+            # --- Data Normalization ---
+            # The following lines map the raw API response to the standardized PermitRecord model.
+
             def parse_ms_date(ms):
+                """Converts ArcGIS Unix timestamps (milliseconds) to ISO dates."""
                 try:
                     if ms: 
                         return datetime.fromtimestamp(ms / 1000.0).strftime('%Y-%m-%d')
                 except: pass
                 return None
 
-            # --- MAPPING LOCK (Based on satest.py) ---
-            # 'File_Date' is the Application Date (Jan 2025 in your logs)
+            # `File_Date` corresponds to the application date.
             applied_iso = parse_ms_date(r.get('File_Date'))
             
-            # 'Status_Date' is the Issue/Expiration Date (Aug 2026 in your logs)
+            # `Status_Date` corresponds to the issue date or, in some cases, a future expiration date.
+            # This is handled by the "Time Guard" in the main orchestrator.
             issued_iso = parse_ms_date(r.get('Status_Date'))
 
             if not issued_iso: continue
 
-            # 2. OTHER FIELDS
+            # Map other fields to the PermitRecord model.
             desc = r.get('B1_WORK_DESC') or r.get('Permit_Type') or "Unspecified"
             val = float(r.get('JobValue') or 0.0)
             pid = str(r.get('Permit_No', 'UNKNOWN'))
