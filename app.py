@@ -5,23 +5,46 @@ run it through the AI processing pipeline, displaying live logs of the process.
 """
 import streamlit as st
 import pandas as pd
+import os
+from datetime import datetime, timedelta
+
 # Import the logic you built in agent_main
 from agent_main import run_permit_agent, save_permit_to_db
+
+# Import new ingestion spokes
+from ingest_new_york import get_new_york_data
+from ingest_chicago import get_chicago_data
+from ingest_san_francisco import get_san_francisco_data
+from ingest_austin import get_austin_data
+from ingest_san_antonio import get_san_antonio_data
+from ingest_fort_worth import get_fort_worth_data
+from ingest_la import get_la_data
 
 st.set_page_config(page_title="Vectis Data Factory", layout="wide")
 
 st.title("🏭 Vectis Serverless Data Factory")
 st.markdown("---")
 
-# --- STEP 1: INGESTION (Mock Data for Testing) ---
-# In the real version, this function would call the Socrata API
+# Define SODAPY_APP_TOKEN and cutoff_date
+# For local development, set SODAPY_APP_TOKEN in your environment variables.
+# For Streamlit Cloud, set it in .streamlit/secrets.toml
+SODAPY_APP_TOKEN = os.getenv("SODAPY_APP_TOKEN") or st.secrets["SODAPY_APP_TOKEN"]
+CUTOFF_DATE = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+
+# --- STEP 1: INGESTION ---
 def get_incoming_data():
-    return [
-        {"id": "FW-2024-001", "desc": "New construction of a 2500 sqft single family home with detached garage."},
-        {"id": "FW-2024-002", "desc": "Commercial finish-out for Starbucks shell. HVAC and electrical work included."},
-        {"id": "FW-2024-003", "desc": "Repairing fence damaged by storm. No structural changes."},
-        {"id": "FW-2024-004", "desc": "Invalid entry test data 12345."} # Let's see how the AI handles "Dirty Data"
-    ]
+    all_records = []
+    
+    # Fetch data from each city's Socrata API
+    all_records.extend(get_new_york_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+    all_records.extend(get_chicago_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+    all_records.extend(get_san_francisco_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+    all_records.extend(get_austin_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+    all_records.extend(get_san_antonio_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+    all_records.extend(get_fort_worth_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+    all_records.extend(get_la_data(SODAPY_APP_TOKEN, CUTOFF_DATE))
+
+    return all_records
 
 # --- THE CONTROL PANEL ---
 col1, col2 = st.columns([1, 2])
