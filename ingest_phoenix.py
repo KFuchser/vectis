@@ -22,8 +22,12 @@ def get_phoenix_data(cutoff_date: str) -> list[PermitRecord]:
     
     url = "https://services.arcgis.com/pdv6O6pX596L23T6/arcgis/rest/services/Open_Data_Development_Permits/FeatureServer/0/query"
     
+    # Convert cutoff_date (YYYY-MM-DD) to Unix timestamp in milliseconds
+    cutoff_dt = datetime.strptime(cutoff_date, "%Y-%m-%d")
+    cutoff_timestamp_ms = int(cutoff_dt.timestamp() * 1000)
+
     params = {
-        "where": f"ISSUED_DATE >= '{cutoff_date} 00:00:00'",
+        "where": f"ISSUED_DATE >= {cutoff_timestamp_ms}",
         "outFields": "*",
         "outSR": "4326",
         "f": "json",

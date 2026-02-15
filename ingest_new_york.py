@@ -27,7 +27,7 @@ def get_new_york_data(app_token, cutoff_date):
     NEW_YORK_API_URL = "https://data.cityofnewyork.us/resource/ipu4-2q9a.json"
     
     params = {
-        "$where": f"issued_date >= '{cutoff_date}T00:00:00'",
+        "$where": f"issued_date >= '{cutoff_date}'",
         "$limit": 5000,
         "$order": "issued_date DESC",
         "$$app_token": app_token
