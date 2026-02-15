@@ -27,7 +27,7 @@ def get_phoenix_data(cutoff_date: str) -> list[PermitRecord]:
     cutoff_timestamp_ms = int(cutoff_dt.timestamp() * 1000)
 
     params = {
-        "where": f"ISSUED_DATE >= {cutoff_timestamp_ms}",
+        # "where": f"ISSUED_DATE >= {cutoff_timestamp_ms}", # Temporarily removed for debugging
         "outFields": "*",
         "outSR": "4326",
         "f": "json",

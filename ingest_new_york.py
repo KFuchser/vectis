@@ -27,9 +27,9 @@ def get_new_york_data(app_token, cutoff_date):
     NEW_YORK_API_URL = "https://data.cityofnewyork.us/resource/ipu4-2q9a.json"
     
     params = {
-        "$where": f"issued_date >= '{cutoff_date}'",
+        "$where": f"issuance_date >= '{cutoff_date}'",
         "$limit": 5000,
-        "$order": "issued_date DESC",
+        "$order": "issuance_date DESC",
         "$$app_token": app_token
     }
     
@@ -55,7 +55,7 @@ def get_new_york_data(app_token, cutoff_date):
                 return d.split("T")[0] if d else None
             
             applied = parse_date(item.get("filing_date"))
-            issued = parse_date(item.get("issued_date"))
+            issued = parse_date(item.get("issuance_date"))
             
             desc = item.get("description") or "Unspecified"
             
