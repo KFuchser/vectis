@@ -38,6 +38,7 @@ def get_new_york_data(app_token, cutoff_date):
         
         if response.status_code != 200:
             print(f"❌ New York API Error: {response.status_code}")
+            print(f"API Response: {response.text}") # Added for debugging
             return []
             
         data = response.json()
