@@ -28,4 +28,13 @@ jobs:
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }} # <--- THE AI AWAKENING TRIGGER
-        run: python ingest_velocity_50.py
+        run: |
+          python ingest_austin.py
+          python ingest_chicago.py
+          python ingest_fort_worth.py
+          python ingest_la.py
+          python ingest_new_york.py
+          python ingest_phoenix.py
+          python ingest_san_antonio.py
+          python ingest_san_francisco.py
+          python ingest_velocity_50.py

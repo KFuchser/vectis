@@ -131,7 +131,7 @@ if not df_raw.empty:
 min_val = st.sidebar.slider("Valuation Floor ($)", 0, 1000000, 0, step=10000)
 all_tiers = ["Commercial", "Residential", "Commodity", "Unknown"]
 selected_tiers = st.sidebar.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
-cities = sorted(list(df_raw['city'].unique()) + ["Phoenix"]) if not df_raw.empty else ["Phoenix"]
+cities = sorted(list(df_raw['city'].unique())) if not df_raw.empty else []
 selected_cities = st.sidebar.multiselect("Jurisdictions", cities, default=cities)
 
 if not df_raw.empty:
