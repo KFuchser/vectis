@@ -30,6 +30,9 @@ from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
 from ingest_la import get_la_data
 from ingest_phoenix import get_phoenix_data
+from ingest_chicago import get_chicago_data
+from ingest_new_york import get_new_york_data
+from ingest_san_francisco import get_san_francisco_data
 
 load_dotenv()
 
@@ -194,6 +197,15 @@ def main():
 
     try: all_data.extend(get_phoenix_data(cutoff))
     except Exception as e: print(f"⚠️ Phoenix Failed: {e}")
+
+    try: all_data.extend(get_chicago_data(SOCRATA_TOKEN, cutoff))
+    except Exception as e: print(f"⚠️ Chicago Failed: {e}")
+
+    try: all_data.extend(get_new_york_data(SOCRATA_TOKEN, cutoff))
+    except Exception as e: print(f"⚠️ New York Failed: {e}")
+
+    try: all_data.extend(get_san_francisco_data(SOCRATA_TOKEN, cutoff))
+    except Exception as e: print(f"⚠️ San Francisco Failed: {e}")
 
     print(f"⚙️ Processing {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
