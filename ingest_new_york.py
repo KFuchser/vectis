@@ -42,6 +42,9 @@ def get_new_york_data(app_token, cutoff_date):
         # The SODA 3.0 /views API typically returns data directly as a list of dictionaries
         data = client.get("ipu4-2q9a", **query_params)
         
+        # DEBUGGING: Print raw data
+        print(f"DEBUG: New York Raw Data: {data}")
+        
         if not data:
             print("⚠️ No New York data returned.")
             return []
