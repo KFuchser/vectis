@@ -1,15 +1,16 @@
 """
-Ingestion spoke for New York, NY (Socrata API).
+Ingestion spoke for New York, NY (Socrata API) using sodapy.
 
 This module handles fetching and normalizing building permit data from the City of New York.
-Endpoint: https://data.cityofnewyork.us/resource/ipu4-2q9a.json
+Endpoint: https://data.cityofnewyork.us/api/views/ipu4-2q9a/rows.json (SODA 3.0 compatible)
 
 Key Logic:
-- Sorts by `issued_date` DESC.
+- Uses sodapy library for robust Socrata API interaction.
 - Maps Socrata API fields to `PermitRecord` fields.
 """
-import requests
+from sodapy import Socrata
 from service_models import PermitRecord, ComplexityTier
+from datetime import datetime, timedelta
 
 def get_new_york_data(app_token, cutoff_date):
     """
@@ -22,26 +23,25 @@ def get_new_york_data(app_token, cutoff_date):
     Returns:
         A list of `PermitRecord` objects, or an empty list if an error occurs.
     """
-    print(f"🗽 Fetching New York data since {cutoff_date}...")
+    print(f"🗽 Fetching New York data since {cutoff_date} using sodapy...")
     
-    NEW_YORK_API_URL = "https://data.cityofnewyork.us/api/v3/views/ipu4-2q9a/query.json"
+    # Socrata API endpoint details for SODA 3.0 /views API
+    # Domain: data.cityofnewyork.us
+    # Dataset ID: ipu4-2q9a
+    client = Socrata("data.cityofnewyork.us", app_token=app_token)
     
-    params = {
-        "$where": f"issuance_date >= '{cutoff_date}'",
-        "$limit": 1000,
-        "$order": "issuance_date DESC",
-        "$$app_token": app_token
+    # Query: SELECT * WHERE issuance_date >= 'YYYY-MM-DD' ORDER BY issuance_date DESC LIMIT 5000
+    # Note: sodapy handles the '$' prefix for parameters
+    query_params = {
+        "where": f"issuance_date >= '{cutoff_date}'",
+        "limit": 5000,
+        "order": "issuance_date DESC",
     }
     
     try:
-        response = requests.get(NEW_YORK_API_URL, params=params, timeout=30)
+        # The SODA 3.0 /views API typically returns data directly as a list of dictionaries
+        data = client.get("ipu4-2q9a", **query_params)
         
-        if response.status_code != 200:
-            print(f"❌ New York API Error: {response.status_code}")
-            print(f"API Response: {response.text}") # Added for debugging
-            return []
-            
-        data = response.json()
         if not data:
             print("⚠️ No New York data returned.")
             return []
@@ -49,8 +49,7 @@ def get_new_york_data(app_token, cutoff_date):
         records = []
         for item in data:
             # --- Data Normalization ---
-            # The following lines map the raw API response to the standardized PermitRecord model.
-
+            # These field names are based on inspection of ipu4-2q9a dataset attributes
             def parse_date(d):
                 return d.split("T")[0] if d else None
             
