@@ -45,6 +45,9 @@ def get_dallas_data(app_token, cutoff_date):
             return []
             
         data = response.json()
+        # DEBUGGING: Print raw data
+        print(f"DEBUG: Dallas Raw Data: {data}")
+
         if not data:
             print("⚠️ No Dallas data returned.")
             return []
