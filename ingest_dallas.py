@@ -48,6 +48,11 @@ def get_dallas_data(app_token, cutoff_date):
             print("⚠️ No Dallas data returned.")
             return []
             
+        # DEBUGGING: Print issued_date of the first record if available
+        if data:
+            first_record_issue_date = data[0].get("issued_date")
+            print(f"DEBUG: Dallas - First record issued_date: {first_record_issue_date}")
+            
         records = []
         for item in data:
             # --- Data Normalization ---
