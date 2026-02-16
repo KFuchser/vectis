@@ -30,7 +30,7 @@ def get_new_york_data(app_token, cutoff_date):
     debug_cutoff_date = "2000-01-01" 
 
     params = {
-        "$where": f"issuance_date >= '{debug_cutoff_date}'",
+        # "$where": f"issuance_date >= '{debug_cutoff_date}'", # Temporarily removed for debugging
         "$limit": 5000,
         "$order": "issuance_date DESC",
         "$$app_token": app_token
