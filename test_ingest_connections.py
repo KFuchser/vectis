@@ -19,7 +19,7 @@ load_dotenv()
 # CONFIG
 SOCRATA_TOKEN = os.getenv("SOCRATA_APP_TOKEN", None)
 # Use a generous cutoff date for testing to ensure data presence if available
-TEST_CUTOFF_DATE = "2000-01-01" # Very old date for debugging purposes
+TEST_CUTOFF_DATE = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d") # 1 year ago
 
 print(f"--- Running API Connection Test Script ---")
 print(f"Test Cutoff Date: {TEST_CUTOFF_DATE}")
