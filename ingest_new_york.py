@@ -33,8 +33,8 @@ def get_new_york_data(app_token, cutoff_date):
     # Query: SELECT * WHERE issuance_date >= 'YYYY-MM-DD' ORDER BY issuance_date DESC LIMIT 5000
     # Note: sodapy handles the '$' prefix for parameters
     query_params = {
-        "where": f"issuance_date >= '{cutoff_date}'",
-        "limit": 5000,
+        # "where": f"issuance_date >= '{cutoff_date}'", # Temporarily removed for debugging
+        "limit": 1, # Reduced for debugging
         "order": "issuance_date DESC",
     }
     

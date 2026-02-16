@@ -30,8 +30,8 @@ def get_dallas_data(app_token, cutoff_date):
     debug_cutoff_date = "2000-01-01" 
 
     params = {
-        "$where": f"issued_date >= '{debug_cutoff_date}'",
-        "$limit": 5000,
+        # "$where": f"issued_date >= '{debug_cutoff_date}'", # Temporarily removed for debugging
+        "$limit": 1, # Reduced for debugging
         "$order": "issued_date DESC",
         "$$app_token": app_token
     }
