@@ -27,9 +27,9 @@ def get_dallas_data(app_token, cutoff_date):
     DALLAS_API_URL = "https://www.dallasopendata.com/resource/e7gq-4sah.json"
     
     params = {
-        "$where": f"issue_date >= '{cutoff_date}'", # Assuming 'issue_date' as common
+        "$where": f"issued_date >= '{cutoff_date}'",
         "$limit": 5000,
-        "$order": "issue_date DESC",
+        "$order": "issued_date DESC",
         "$$app_token": app_token
     }
     
@@ -54,8 +54,8 @@ def get_dallas_data(app_token, cutoff_date):
             
             # These field names are guesses based on common Socrata patterns.
             # Will need to verify if data returned or error occurs.
-            applied = parse_date(item.get("application_date")) 
-            issued = parse_date(item.get("issue_date"))
+            applied = None # No 'application_date' found in Dallas API response
+            issued = parse_date(item.get("issued_date"))
             
             desc = item.get("description") or item.get("work_description") or "Unspecified"
             
