@@ -33,17 +33,14 @@ def get_new_york_data(app_token, cutoff_date):
     # Query: SELECT * WHERE issuance_date >= 'YYYY-MM-DD' ORDER BY issuance_date DESC LIMIT 5000
     # Note: sodapy handles the '$' prefix for parameters
     query_params = {
-        # "where": f"issuance_date >= '{cutoff_date}'", # Temporarily removed for debugging
-        "limit": 1, # Reduced for debugging
+        "where": f"issuance_date >= '{cutoff_date}'",
+        "limit": 5000,
         "order": "issuance_date DESC",
     }
     
     try:
         # The SODA 3.0 /views API typically returns data directly as a list of dictionaries
         data = client.get("ipu4-2q9a", **query_params)
-        
-        # DEBUGGING: Print raw data
-        print(f"DEBUG: New York Raw Data: {data}")
         
         if not data:
             print("⚠️ No New York data returned.")
@@ -59,9 +56,11 @@ def get_new_york_data(app_token, cutoff_date):
             applied = parse_date(item.get("filing_date"))
             issued = parse_date(item.get("issuance_date"))
             
-            desc = item.get("description") or "Unspecified"
+            # Using 'work_type' as description since 'description' field was not consistently present
+            desc = item.get("work_type") or "Unspecified"
             
-            try: val = float(item.get("total_estimated_cost", 0.0) or 0.0)
+            # 'total_estimated_cost' not consistently present in sample; defaulting valuation to 0.0
+            try: val = float(item.get("total_estimated_cost", 0.0) or 0.0) 
             except: val = 0.0
 
             r = PermitRecord(

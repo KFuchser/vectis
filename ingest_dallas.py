@@ -5,11 +5,12 @@ This module handles fetching and normalizing building permit data from the City 
 Endpoint: https://www.dallasopendata.com/resource/e7gq-4sah.json
 
 Key Logic:
-- Sorts by `issue_date` DESC.
+- Sorts by `issued_date` DESC.
 - Maps Socrata API fields to `PermitRecord` fields.
 """
 import requests
 from service_models import PermitRecord, ComplexityTier
+from datetime import datetime # Import datetime for date parsing
 
 def get_dallas_data(app_token, cutoff_date):
     """
@@ -26,12 +27,9 @@ def get_dallas_data(app_token, cutoff_date):
     
     DALLAS_API_URL = "https://www.dallasopendata.com/resource/e7gq-4sah.json"
     
-    # Debugging: Temporarily set a very old cutoff_date to check if any data is returned
-    debug_cutoff_date = "2000-01-01" 
-
     params = {
-        # "$where": f"issued_date >= '{debug_cutoff_date}'", # Temporarily removed for debugging
-        "$limit": 1, # Reduced for debugging
+        "$where": f"issued_date >= '{cutoff_date}'", # Reverted to production logic
+        "$limit": 5000, # Reverted to production logic
         "$order": "issued_date DESC",
         "$$app_token": app_token
     }
@@ -41,13 +39,12 @@ def get_dallas_data(app_token, cutoff_date):
         
         if response.status_code != 200:
             print(f"❌ Dallas API Error: {response.status_code}")
-            print(f"API Response: {response.text}") # Added for debugging
+            print(f"API Response: {response.text}") 
             return []
             
         data = response.json()
-        # DEBUGGING: Print raw data
-        print(f"DEBUG: Dallas Raw Data: {data}")
-
+        # Removed DEBUGGING: Print raw data
+        
         if not data:
             print("⚠️ No Dallas data returned.")
             return []
@@ -55,17 +52,25 @@ def get_dallas_data(app_token, cutoff_date):
         records = []
         for item in data:
             # --- Data Normalization ---
-            def parse_date(d):
-                return d.split("T")[0] if d else None
+            def parse_date(d_str):
+                if not d_str: return None
+                try:
+                    # Try parsing MM/DD/YY
+                    return datetime.strptime(d_str, "%m/%d/%y").strftime("%Y-%m-%d")
+                except ValueError:
+                    try:
+                        # Try parsing MM/DD/YYYY
+                        return datetime.strptime(d_str, "%m/%d/%Y").strftime("%Y-%m-%d")
+                    except ValueError:
+                        # Fallback for other formats or return None
+                        return None
             
-            # These field names are guesses based on common Socrata patterns.
-            # Will need to verify if data returned or error occurs.
             applied = None # No 'application_date' found in Dallas API response
             issued = parse_date(item.get("issued_date"))
             
-            desc = item.get("description") or item.get("work_description") or "Unspecified"
+            desc = item.get("work_description") or "Unspecified" # Mapped to work_description
             
-            try: val = float(item.get("valuation", 0.0) or 0.0)
+            try: val = float(item.get("value", 0.0) or 0.0) # Mapped to 'value'
             except: val = 0.0
 
             r = PermitRecord(
