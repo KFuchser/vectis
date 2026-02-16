@@ -27,8 +27,11 @@ def get_dallas_data(app_token, cutoff_date):
     
     DALLAS_API_URL = "https://www.dallasopendata.com/resource/e7gq-4sah.json"
     
+    # Debugging: Temporarily set a very old cutoff_date to check if any data is returned
+    debug_cutoff_date = "2000-01-01" 
+
     params = {
-        "$where": f"issued_date >= '{cutoff_date}'", # Reverted to production logic
+        "$where": f"issued_date >= '{debug_cutoff_date}'", # Reverted to production logic
         "$limit": 5000, # Reverted to production logic
         "$order": "issued_date DESC",
         "$$app_token": app_token

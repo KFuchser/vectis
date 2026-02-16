@@ -30,10 +30,13 @@ def get_new_york_data(app_token, cutoff_date):
     # Dataset ID: ipu4-2q9a
     client = Socrata("data.cityofnewyork.us", app_token=app_token)
     
+    # Debugging: Temporarily set a very old cutoff_date to check if any data is returned
+    debug_cutoff_date = "2000-01-01" 
+
     # Query: SELECT * WHERE issuance_date >= 'YYYY-MM-DD' ORDER BY issuance_date DESC LIMIT 5000
     # Note: sodapy handles the '$' prefix for parameters
     query_params = {
-        "where": f"issuance_date >= '{cutoff_date}'",
+        "where": f"issuance_date >= '{debug_cutoff_date}'",
         "limit": 5000,
         "order": "issuance_date DESC",
     }
