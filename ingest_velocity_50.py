@@ -29,7 +29,6 @@ from ingest_austin import get_austin_data
 from ingest_san_antonio import get_san_antonio_data
 from ingest_fort_worth import get_fort_worth_data
 from ingest_la import get_la_data
-from ingest_phoenix import get_phoenix_data
 from ingest_dallas import get_dallas_data
 from ingest_chicago import get_chicago_data
 from ingest_new_york import get_new_york_data
@@ -195,9 +194,6 @@ def main():
     
     try: all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
     except Exception as e: print(f"⚠️ LA Failed: {e}")
-
-    try: all_data.extend(get_phoenix_data(cutoff))
-    except Exception as e: print(f"⚠️ Phoenix Failed: {e}")
 
     try: all_data.extend(get_dallas_data(SOCRATA_TOKEN, cutoff))
     except Exception as e: print(f"⚠️ Dallas Failed: {e}")
