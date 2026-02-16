@@ -28,8 +28,8 @@ def get_dallas_data(app_token, cutoff_date):
     DALLAS_API_URL = "https://www.dallasopendata.com/resource/e7gq-4sah.json"
     
     params = {
-        # "$where": f"issued_date >= '{cutoff_date}'", # Temporarily removed for debugging
-        "$limit": 1, # Reduced for debugging
+        "$where": f"issued_date >= '{cutoff_date}'",
+        "$limit": 5000,
         "$order": "issued_date DESC",
         "$$app_token": app_token
     }
@@ -47,11 +47,6 @@ def get_dallas_data(app_token, cutoff_date):
         if not data:
             print("⚠️ No Dallas data returned.")
             return []
-            
-        # DEBUGGING: Print issued_date of the first record if available
-        if data:
-            first_record_issue_date = data[0].get("issued_date")
-            print(f"DEBUG: Dallas - First record issued_date: {first_record_issue_date}")
             
         records = []
         for item in data:

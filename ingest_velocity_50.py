@@ -195,7 +195,9 @@ def main():
     try: all_data.extend(get_la_data(cutoff, SOCRATA_TOKEN))
     except Exception as e: print(f"⚠️ LA Failed: {e}")
 
-    try: all_data.extend(get_dallas_data(SOCRATA_TOKEN, cutoff))
+    # Dallas has older records, extend cutoff to 1 year
+    dallas_cutoff = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+    try: all_data.extend(get_dallas_data(SOCRATA_TOKEN, dallas_cutoff))
     except Exception as e: print(f"⚠️ Dallas Failed: {e}")
 
     try: all_data.extend(get_chicago_data(SOCRATA_TOKEN, cutoff))

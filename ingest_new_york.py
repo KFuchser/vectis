@@ -27,29 +27,21 @@ def get_new_york_data(app_token, cutoff_date):
     
     # Socrata API endpoint details for SODA 3.0 /views API
     # Domain: data.cityofnewyork.us
-    # Dataset ID: ipu4-2q9a
+    # Dataset ID: rbx6-tga4 (Newer DOB NOW data)
     client = Socrata("data.cityofnewyork.us", app_token=app_token)
     
-    # Query: SELECT * WHERE issuance_date >= 'YYYY-MM-DD' ORDER BY issuance_date DESC LIMIT 5000
-    # Note: sodapy handles the '$' prefix for parameters
+    # Query: SELECT * ORDER BY issue_date DESC LIMIT 1 (for debugging raw data)
     query_params = {
-        # "where": f"issuance_date >= '{cutoff_date}'", # Temporarily removed for debugging
+        # "where": f"issue_date >= '{cutoff_date}'", # Re-enable after mapping
         "limit": 1, # Reduced for debugging
-        "order": "issuance_date DESC",
+        "order": "issue_date DESC", # Assuming 'issue_date'
     }
     
     try:
-        # The SODA 3.0 /views API typically returns data directly as a list of dictionaries
-        data = client.get("ipu4-2q9a", **query_params)
+        data = client.get("rbx6-tga4", **query_params)
         
-        if not data:
-            print("⚠️ No New York data returned.")
-            return []
-            
-        # DEBUGGING: Print issuance_date of the first record if available
-        if data:
-            first_record_issue_date = data[0].get("issuance_date")
-            print(f"DEBUG: New York - First record issuance_date: {first_record_issue_date}")
+        # DEBUGGING: Print raw data from new endpoint
+        print(f"DEBUG: New York Raw Data (rbx6-tga4): {data}")
             
         records = []
         for item in data:
