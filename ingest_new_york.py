@@ -28,7 +28,7 @@ def get_new_york_data(app_token, cutoff_date):
     
     params = {
         "$where": f"issuance_date >= '{cutoff_date}'",
-        "$limit": 5000,
+        "$limit": 1000,
         "$order": "issuance_date DESC",
         "$$app_token": app_token
     }
