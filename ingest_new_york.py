@@ -24,7 +24,7 @@ def get_new_york_data(app_token, cutoff_date):
     """
     print(f"🗽 Fetching New York data since {cutoff_date}...")
     
-    NEW_YORK_API_URL = "https://data.cityofnewyork.us/resource/ipu4-2q9a.json"
+    NEW_YORK_API_URL = "https://data.cityofnewyork.us/api/v3/views/ipu4-2q9a/query.json"
     
     params = {
         "$where": f"issuance_date >= '{cutoff_date}'",
