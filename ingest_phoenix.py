@@ -31,7 +31,7 @@ def get_phoenix_data(cutoff_date: str) -> list[PermitRecord]:
         "outFields": "*",
         "outSR": "4326",
         "f": "json",
-        "resultRecordCount": 2000, 
+        "resultRecordCount": 1, 
         "orderByFields": "ISSUED_DATE DESC"
     }
 
