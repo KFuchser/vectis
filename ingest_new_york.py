@@ -30,39 +30,36 @@ def get_new_york_data(app_token, cutoff_date):
     # Dataset ID: rbx6-tga4 (Newer DOB NOW data)
     client = Socrata("data.cityofnewyork.us", app_token=app_token)
     
-    # Query: SELECT * ORDER BY issue_date DESC LIMIT 1 (for debugging raw data)
     query_params = {
-        # "where": f"issue_date >= '{cutoff_date}'", # Re-enable after mapping
-        "limit": 1, # Reduced for debugging
-        "order": "issue_date DESC", # Assuming 'issue_date'
+        "where": f"issued_date >= '{cutoff_date}'",
+        "limit": 5000,
+        "order": "issued_date DESC",
     }
     
     try:
         data = client.get("rbx6-tga4", **query_params)
         
-        # DEBUGGING: Print raw data from new endpoint
-        print(f"DEBUG: New York Raw Data (rbx6-tga4): {data}")
+        if not data:
+            print("⚠️ No New York data returned.")
+            return []
             
         records = []
         for item in data:
             # --- Data Normalization ---
-            # These field names are based on inspection of ipu4-2q9a dataset attributes
             def parse_date(d):
                 return d.split("T")[0] if d else None
             
-            applied = parse_date(item.get("filing_date"))
-            issued = parse_date(item.get("issuance_date"))
+            applied = parse_date(item.get("approved_date")) # Using approved_date as closest to applied_date
+            issued = parse_date(item.get("issued_date"))
             
-            # Using 'work_type' as description since 'description' field was not consistently present
-            desc = item.get("work_type") or "Unspecified"
+            desc = item.get("job_description") or "Unspecified"
             
-            # 'total_estimated_cost' not consistently present in sample; defaulting valuation to 0.0
-            try: val = float(item.get("total_estimated_cost", 0.0) or 0.0) 
+            try: val = float(item.get("estimated_job_costs", 0.0) or 0.0) 
             except: val = 0.0
 
             r = PermitRecord(
                 city="New York",
-                permit_id=item.get("permit_si_no", "UNKNOWN"),
+                permit_id=item.get("job_filing_number", "UNKNOWN"),
                 applied_date=applied,
                 issued_date=issued,
                 description=desc,
