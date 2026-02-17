@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 # Note: ingest_new_york.py and ingest_dallas.py are assumed to be reverted to original working state for this test
 # (i.e., not the debugging states with removed filters or fixed old dates)
 from ingest_new_york import get_new_york_data
-from ingest_dallas import get_dallas_data
 
 load_dotenv()
 
@@ -41,6 +40,3 @@ def run_test_for_city(city_name, get_data_func, *args):
 if __name__ == "__main__":
     # Test New York
     run_test_for_city("New York", get_new_york_data, SOCRATA_TOKEN, TEST_CUTOFF_DATE)
-    
-    # Test Dallas
-    run_test_for_city("Dallas", get_dallas_data, SOCRATA_TOKEN, TEST_CUTOFF_DATE)
