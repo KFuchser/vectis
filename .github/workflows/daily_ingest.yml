@@ -34,7 +34,6 @@ jobs:
           python ingest_fort_worth.py
           python ingest_la.py
           python ingest_new_york.py
-          python ingest_phoenix.py
           python ingest_san_antonio.py
           python ingest_san_francisco.py
           python ingest_velocity_50.py
