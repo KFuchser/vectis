@@ -128,7 +128,7 @@ if not df_raw.empty:
         st.dataframe(counts, use_container_width=True, hide_index=True)
 
 # --- FILTERS ---
-min_val = st.sidebar.slider("Valuation Floor ($)", 0, 1000000, 0, step=10000)
+min_val = st.sidebar.number_input("Valuation Floor ($)", min_value=0, value=0, step=10000)
 all_tiers = ["Commercial", "Residential", "Commodity", "Unknown"]
 selected_tiers = st.sidebar.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
 cities = sorted(list(df_raw['city'].unique())) if not df_raw.empty else []
