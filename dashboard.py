@@ -20,6 +20,12 @@ import time
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
+def get_city_from_query_params():
+    """Checks URL query parameters for a 'city' and returns it if found."""
+    params = st.query_params
+    return params.get("city")
+
+
 # --- STYLING ---
 st.markdown("""
     <style>
@@ -120,30 +126,50 @@ if st.sidebar.button("🔄 Force Refresh"):
 
 df_raw = load_data()
 
-# --- TRUTH TABLE (VERIFICATION) ---
-if not df_raw.empty:
-    with st.expander("🔎 Database Content Verification (Click to Expand)", expanded=True):
-        counts = df_raw['city'].value_counts().reset_index()
-        counts.columns = ['City', 'Record Count']
-        st.dataframe(counts, use_container_width=True, hide_index=True)
+selected_city = get_city_from_query_params()
+
+if selected_city:
+    if not df_raw.empty and selected_city in df_raw['city'].unique():
+        df_view = df_raw[df_raw['city'] == selected_city].copy()
+        st.title(f"🏛️ {selected_city} Regulatory Friction Index")
+    else:
+        st.warning(f"'{selected_city}' is not a valid city. Showing national view.")
+        selected_city = None
+        df_view = df_raw.copy()
+        st.title("🏛️ National Regulatory Friction Index")
+else:
+    df_view = df_raw.copy()
+    st.title("🏛️ National Regulatory Friction Index")
+    if not df_raw.empty:
+        with st.expander("🔎 Database Content Verification (Click to Expand)", expanded=True):
+            counts = df_raw['city'].value_counts().reset_index()
+            counts.columns = ['City', 'Record Count']
+            st.dataframe(counts, use_container_width=True, hide_index=True)
+
+        with st.expander("🏙️ City-Specific Dashboards (Click to Expand)", expanded=False):
+            all_cities_for_links = sorted(list(df_raw['city'].unique()))
+            for city_link in all_cities_for_links:
+                st.markdown(f"#### [{city_link} Dashboard](/?city={city_link})")
 
 # --- FILTERS ---
 min_val = st.sidebar.number_input("Valuation Floor ($)", min_value=0, value=0, step=10000)
 all_tiers = ["Commercial", "Residential", "Commodity", "Unknown"]
 selected_tiers = st.sidebar.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
-cities = sorted(list(df_raw['city'].unique())) if not df_raw.empty else []
-selected_cities = st.sidebar.multiselect("Jurisdictions", cities, default=cities)
 
-if not df_raw.empty:
-    df = df_raw[
-        (df_raw['valuation'] >= min_val) & 
-        (df_raw['complexity_tier'].isin(selected_tiers)) &
-        (df_raw['city'].isin(selected_cities))
+if not selected_city:
+    cities = sorted(list(df_view['city'].unique())) if not df_view.empty else []
+    selected_cities_from_filter = st.sidebar.multiselect("Jurisdictions", cities, default=cities)
+else:
+    selected_cities_from_filter = [selected_city]
+
+if not df_view.empty:
+    df = df_view[
+        (df_view['valuation'] >= min_val) &
+        (df_view['complexity_tier'].isin(selected_tiers)) &
+        (df_view['city'].isin(selected_cities_from_filter))
     ].copy()
 else:
     df = pd.DataFrame()
-
-st.title("🏛️ National Regulatory Friction Index")
 
 if df.empty:
     st.warning("No records found. Check filters or database connection.")
