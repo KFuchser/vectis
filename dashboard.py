@@ -17,6 +17,7 @@ import pandas as pd
 import altair as alt
 from supabase import create_client, Client
 import time
+from urllib.parse import quote
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
@@ -149,7 +150,7 @@ else:
         with st.expander("🏙️ City-Specific Dashboards (Click to Expand)", expanded=False):
             all_cities_for_links = sorted(list(df_raw['city'].unique()))
             for city_link in all_cities_for_links:
-                st.markdown(f"#### [{city_link} Dashboard](/?city={city_link})")
+                st.markdown(f"#### [{city_link} Dashboard](/?city={quote(city_link)})")
 
 # --- FILTERS ---
 min_val = st.sidebar.number_input("Valuation Floor ($)", min_value=0, value=0, step=10000)
