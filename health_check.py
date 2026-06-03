@@ -18,48 +18,48 @@ def run_health_scan():
     today = datetime.now().date()
     
     # --- CHECK 1: The "Pulse" (Did we get data?) ---
-    # We check if any records were updated/created in the last 24 hours.
-    # Note: Since your schema uses 'created_at', we filter by that.
-    # For a robust check, we might look at 'applied_date' recency, but this is a system check.
-    
-    # Fetch count of records created today (UTC)
-    response = supabase.table('permits') \
-        .select('*', count='exact', head=True) \
-        .gte('created_at', f"{today} 00:00:00") \
+    # We check the most recent record to see if ingestion happened recently.
+    recent_res = supabase.table('permits') \
+        .select('created_at') \
+        .order('created_at', desc=True) \
+        .limit(1) \
         .execute()
         
-    daily_volume = response.count
-    print(f"   - Daily Ingestion Volume: {daily_volume} records")
-    
-    if daily_volume == 0:
-        print("   🚨 CRITICAL: Flatline Alert. No data ingested today.")
-        # In production, this would trigger an email/SMS via Twilio or SendGrid
+    if not recent_res.data:
+        print("   🚨 CRITICAL: No records found in database.")
+    else:
+        last_created = datetime.fromisoformat(recent_res.data[0]['created_at'].split('+')[0]).date()
+        print(f"   - Most Recent Ingestion: {last_created}")
+        
+        if last_created < today:
+            print(f"   🚨 CRITICAL: Flatline Alert. Last data was ingested on {last_created}.")
+        else:
+            print(f"   ✅ Pulse: Active (Data ingested today)")
     
     # --- CHECK 2: The "Time Travel" Regression ---
     # Did any negative processing_days slip through?
-    bad_dates = supabase.table('permits') \
-        .select('*', count='exact', head=True) \
+    # We check for existence of bad records rather than counting all of them.
+    bad_dates_res = supabase.table('permits') \
+        .select('id') \
         .lt('processing_days', 0) \
+        .limit(5) \
         .execute()
-        
-    if bad_dates.count > 0:
-        print(f"   ❌ FAILURE: Found {bad_dates.count} records with negative duration.")
+    
+    if len(bad_dates_res.data) > 0:
+        print(f"   ❌ FAILURE: Found records with negative duration.")
     else:
         print("   ✅ Temporal Logic: Clean")
 
     # --- CHECK 3: The "Imposter" Leak ---
-    # Did 'Model Home' slip into a Strategic/Commercial tier?
-    # We query for descriptions containing 'Model Home' that represent High Value logic
-    # (Assuming High Value logic might be flagged elsewhere, but here we check tier consistency)
-    imposters = supabase.table('permits') \
-        .select('*', count='exact', head=True) \
+    imposters_res = supabase.table('permits') \
+        .select('id') \
         .ilike('description', '%Model Home%') \
         .neq('complexity_tier', 'Residential') \
-        .neq('complexity_tier', 'Standard') \
+        .limit(5) \
         .execute()
-        
-    if imposters.count > 0:
-        print(f"   ⚠️ WARNING: {imposters.count} 'Model Home' records found in wrong tier.")
+    
+    if len(imposters_res.data) > 0:
+        print(f"   ⚠️ WARNING: 'Model Home' records found in wrong tier.")
     else:
         print("   ✅ Imposter Protocol: Clean")
         

@@ -1,20 +1,28 @@
-# check_models.py
 """
 A standalone diagnostic script to verify access to Google Generative AI models.
-It uses a manually provided API key to list all available models that support
-the 'generateContent' method, helping to debug API key or access issues.
+Lists all available models that support the 'generateContent' method.
+
+Usage:
+    GOOGLE_API_KEY=your_key python check_models.py
+  or with a .env file:
+    python check_models.py
 """
 import os
 import google.generativeai as genai
+from dotenv import load_dotenv
 
+load_dotenv()
 
-# 1. Manually paste your key here to rule out any "secrets.toml" issues
-# (Delete this line after the test)
-MY_KEY = "AIzaSyCftQ5LW6xs1KxaYLJHcp7mQaJqy4pADdM" # <--- PASTE YOUR KEY INSIDE THESE QUOTES
+api_key = os.getenv("GOOGLE_API_KEY")
 
-genai.configure(api_key=MY_KEY)
+if not api_key:
+    print("❌ ERROR: GOOGLE_API_KEY not found in environment or .env file.")
+    print("   Set it with: export GOOGLE_API_KEY=your_key")
+    exit(1)
 
-print(f"Checking models for key ending in ...{MY_KEY[-4:]}")
+genai.configure(api_key=api_key)
+
+print(f"Checking models for key ending in ...{api_key[-4:]}")
 
 try:
     print("--- AVAILABLE MODELS ---")

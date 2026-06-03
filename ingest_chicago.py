@@ -79,3 +79,13 @@ def get_chicago_data(app_token, cutoff_date):
     except Exception as e:
         print(f"❌ Chicago Integration Error: {e}")
         return []
+
+if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    token = os.getenv("SOCRATA_APP_TOKEN")
+    cutoff = "2026-03-01"
+    results = get_chicago_data(token, cutoff)
+    for r in results[:5]:
+        print(r)

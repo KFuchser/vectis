@@ -23,7 +23,12 @@ def get_new_york_data(app_token, cutoff_date):
     Returns:
         A list of `PermitRecord` objects, or an empty list if an error occurs.
     """
-    print(f"🗽 Fetching New York data since {cutoff_date} using sodapy...")
+    # --- HARD LIMIT: 24 MONTHS ---
+    # Ensure the cutoff date is no further back than 24 months from today.
+    max_history = (datetime.now() - timedelta(days=24*30)).strftime("%Y-%m-%d")
+    final_cutoff = max(cutoff_date, max_history)
+    
+    print(f"🗽 Fetching New York data since {final_cutoff} (requested: {cutoff_date}) using sodapy...")
     
     # Socrata API endpoint details for SODA 3.0 /views API
     # Domain: data.cityofnewyork.us
@@ -31,7 +36,7 @@ def get_new_york_data(app_token, cutoff_date):
     client = Socrata("data.cityofnewyork.us", app_token=app_token)
     
     query_params = {
-        "where": f"issued_date >= '{cutoff_date}'",
+        "where": f"issued_date >= '{final_cutoff}' AND approved_date >= '{final_cutoff}'",
         "limit": 5000,
         "order": "issued_date DESC",
     }
@@ -75,3 +80,16 @@ def get_new_york_data(app_token, cutoff_date):
     except Exception as e:
         print(f"❌ New York Integration Error: {e}")
         return []
+
+if __name__ == "__main__":
+    import os
+    from dotenv import load_dotenv
+    load_dotenv()
+    token = os.getenv("SOCRATA_APP_TOKEN")
+    # Test with a very old date to verify the 24-month hard limit
+    cutoff = "2000-01-01"
+    results = get_new_york_data(token, cutoff)
+    if results:
+        print(f"Earliest record in batch: {results[-1].issued_date}")
+        for r in results[:5]:
+            print(r)

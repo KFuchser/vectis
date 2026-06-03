@@ -2,7 +2,7 @@ name: Daily Data Factory Pipeline
 
 on:
   schedule:
-    - cron: "0 11 * * *" # Runs at 6:00 AM UTC (Daily)
+    - cron: "0 11 * * *" # Runs at 6:00 AM CST (11:00 UTC) daily
   workflow_dispatch:      # Allows manual "Push to Start"
 
 jobs:
@@ -15,25 +15,27 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11" # Upgraded for Pydantic V2 performance
+          python-version: "3.11"
 
       - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install google-generativeai # Ensuring AI library is present
+        run: pip install -r requirements.txt
 
       - name: Run Unified Ingestion Factory
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           SOCRATA_APP_TOKEN: ${{ secrets.SOCRATA_APP_TOKEN }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }} # <--- THE AI AWAKENING TRIGGER
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
         run: |
-          python ingest_austin.py
-          python ingest_chicago.py
-          python ingest_fort_worth.py
-          python ingest_la.py
-          python ingest_new_york.py
-          python ingest_san_antonio.py
-          python ingest_san_francisco.py
+          # ingest_velocity_50.py is the single orchestrator entry point.
+          # It calls all city spokes internally — do NOT also run the individual
+          # ingest_*.py scripts here, or every city will be fetched and billed twice.
           python ingest_velocity_50.py
+
+      - name: Run AI Classification Engine
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: |
+          python classify_engine.py
