@@ -1,23 +1,15 @@
 """
-Defines the core Pydantic data models for the Vectis pipeline.
-This includes the central `PermitRecord` model and enumerated types for classification,
-ensuring data consistency across all ingestion and processing scripts.
-"""
-"""
-Vectis Service Models
-Defines the Pydantic schemas and Enums for the Data Factory.
+Vectis Service Models — Pydantic schemas and Enums for the Data Factory.
 """
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel
 
 class ComplexityTier(str, Enum):
-    """
-    The 3-Tier Taxonomy.
-    """
-    COMMODITY = "Commodity"     # Low value, high volume
-    RESIDENTIAL = "Residential" # The missing piece causing your crash
-    COMMERCIAL = "Commercial"   # High value, strategic
+    """Orchestrator taxonomy: four tiers assigned at ingest time."""
+    COMMODITY = "Commodity"
+    RESIDENTIAL = "Residential"
+    COMMERCIAL = "Commercial"
     UNKNOWN = "Unknown"
 
 class ProjectCategory(str, Enum):

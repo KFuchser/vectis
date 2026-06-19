@@ -16,6 +16,16 @@ import requests
 from datetime import datetime
 from service_models import PermitRecord, ComplexityTier
 
+
+def _parse_ms_date(ms):
+    """Converts an ArcGIS Unix timestamp (milliseconds) to YYYY-MM-DD, or returns None."""
+    try:
+        if ms:
+            return datetime.fromtimestamp(ms / 1000.0).strftime('%Y-%m-%d')
+    except (OSError, ValueError, TypeError):
+        pass
+    return None
+
 def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
     """
     Fetches and normalizes building permit data from the City of Fort Worth's ArcGIS API.
@@ -30,45 +40,47 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
     
     url = "https://services5.arcgis.com/3ddLCBXe1bRt7mzj/arcgis/rest/services/CFW_Open_Data_Development_Permits_View/FeatureServer/0/query"
     
-    params = {
-        "where": f"Status_Date >= '{cutoff_date} 00:00:00'",
-        "outFields": "*",
-        "outSR": "4326",
-        "f": "json",
-        "resultRecordCount": 2000, 
-        "orderByFields": "Status_Date DESC"
-    }
+    PAGE_SIZE = 1000
+    all_features = []
+    offset = 0
 
     try:
-        response = requests.get(url, params=params)
-        response.raise_for_status()
-        data = response.json()
+        while True:
+            params = {
+                "where": f"Status_Date >= '{cutoff_date} 00:00:00'",
+                "outFields": "*",
+                "outSR": "4326",
+                "f": "json",
+                "resultRecordCount": PAGE_SIZE,
+                "resultOffset": offset,
+                "orderByFields": "Status_Date DESC"
+            }
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            data = response.json()
 
-        if "features" not in data or not data["features"]:
-            print(f"⚠️ Fort Worth: No records found.")
+            features = data.get("features", [])
+            if not features:
+                break
+
+            all_features.extend(features)
+
+            if len(features) < PAGE_SIZE:
+                break
+
+            offset += PAGE_SIZE
+            print(f"   Fort Worth: fetched {len(all_features)} records so far...")
+
+        if not all_features:
+            print("Fort Worth: No records found.")
             return []
 
-        raw_records = [f["attributes"] for f in data["features"]]
+        raw_records = [f["attributes"] for f in all_features]
         mapped_records = []
-        
+
         for r in raw_records:
-            # --- Data Normalization ---
-            # The following lines map the raw API response to the standardized PermitRecord model.
-
-            def parse_ms_date(ms):
-                """Converts ArcGIS Unix timestamps (milliseconds) to ISO dates."""
-                try:
-                    if ms: 
-                        return datetime.fromtimestamp(ms / 1000.0).strftime('%Y-%m-%d')
-                except: pass
-                return None
-
-            # `File_Date` corresponds to the application date.
-            applied_iso = parse_ms_date(r.get('File_Date'))
-            
-            # `Status_Date` corresponds to the issue date or, in some cases, a future expiration date.
-            # This is handled by the "Time Guard" in the main orchestrator.
-            issued_iso = parse_ms_date(r.get('Status_Date'))
+            applied_iso = _parse_ms_date(r.get('File_Date'))
+            issued_iso = _parse_ms_date(r.get('Status_Date'))
 
             if not issued_iso: continue
 
@@ -81,7 +93,7 @@ def get_fort_worth_data(cutoff_date: str) -> list[PermitRecord]:
                 permit_id=pid,
                 city="Fort Worth",
                 status="Issued",
-                applied_date=applied_iso, # Now populated!
+                applied_date=applied_iso,
                 issued_date=issued_iso,
                 description=desc,
                 valuation=val,

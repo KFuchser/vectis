@@ -9,6 +9,9 @@ The pipeline currently ingests data from the following cities:
 - San Antonio, TX
 - Fort Worth, TX
 - Los Angeles, CA
+- Chicago, IL
+- New York, NY
+- San Francisco, CA
 
 ## Getting Started
 
@@ -33,43 +36,35 @@ The pipeline currently ingests data from the following cities:
      ```
      SUPABASE_URL="your_supabase_url"
      SUPABASE_KEY="your_supabase_key"
+     GOOGLE_API_KEY="your_gemini_api_key"
+     SOCRATA_APP_TOKEN="your_socrata_token"
      ```
+   - `GOOGLE_API_KEY` and `SOCRATA_APP_TOKEN` are required. The orchestrator will raise `EnvironmentError` at startup if any of the first three are missing.
 
 ## Project Structure
 
 ```
-├── .github/              # GitHub Actions workflows
-├── .streamlit/           # Streamlit configuration
-├── venv/                 # Virtual environment
+├── .github/                  # GitHub Actions workflows (daily 6 AM UTC)
+├── .streamlit/               # Streamlit secrets config (production)
+├── .venv/                    # Virtual environment
 ├── .gitignore
-├── ARCHITECTURE.md       # System architecture and design
-├── OPERATIONAL_PLAYBOOK.md # Maintenance and troubleshooting
-├── README.md             # This file
-├── agent_main.py
-├── ai_classifier.py
-├── app.py
-├── check_models.py
-├── classify_engine.py
-├── connection_report.md
-├── dashboard.py          # Main Streamlit dashboard
-├── gemini.md
-├── health_check.py
-├── ingest_austin.py      # Ingestion script for Austin
-├── ingest_fort_worth.py  # Ingestion script for Fort Worth
-├── ingest_la.py          # Ingestion script for Los Angeles
-├── ingest_san_antonio.py # Ingestion script for San Antonio
-├── ingest_velocity_50.py # Main ingestion orchestrator
-├── inspect_schema.py
-├── keyword_classifier.py
+├── ARCHITECTURE.md           # System architecture and critical logic locks
+├── OPERATIONAL_PLAYBOOK.md   # Health checks and troubleshooting
+├── README.md                 # This file
+├── classify_engine.py        # Post-ingest re-classification engine (standalone)
+├── dashboard.py              # Streamlit dashboard (Vectis Command Console)
+├── health_check.py           # Connection and schema validation utility
+├── ingest_austin.py          # Austin, TX spoke (Socrata)
+├── ingest_chicago.py         # Chicago, IL spoke (Socrata, paginated)
+├── ingest_fort_worth.py      # Fort Worth, TX spoke (ArcGIS)
+├── ingest_la.py              # Los Angeles, CA spoke (Socrata, volume-only)
+├── ingest_new_york.py        # New York, NY spoke (sodapy, paginated, 24-month limit)
+├── ingest_san_antonio.py     # San Antonio, TX spoke (CKAN, composite ID)
+├── ingest_san_francisco.py   # San Francisco, CA spoke (Socrata)
+├── ingest_velocity_50.py     # Main orchestrator — fetch → classify → upsert
 ├── requirements.txt
-├── runback.py
-├── satest.py
-├── scrub_history.py
-├── service_models.py
-├── systemstate.md        # Legacy system state
-├── test_logic.py
-├── vc.py
-└── verify_gemini.py
+├── service_models.py         # Pydantic models: PermitRecord, ComplexityTier, ProjectCategory
+└── vc.py                     # CLI health check: shows max issued_date per city
 ```
 
 ## Running the Pipeline

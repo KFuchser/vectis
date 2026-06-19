@@ -83,8 +83,8 @@ def load_data():
             data = response.data
             all_records.extend(data)
             
-            # Update progress bar (visual feedback)
-            my_bar.progress(min(len(all_records) / 12000, 1.0), text=f"Fetched {len(all_records)} records...")
+            # Progress is relative — total unknown until fetch completes; bar clears after loop
+            my_bar.progress(min(len(all_records) / (len(all_records) + chunk_size), 0.95), text=f"Fetched {len(all_records)} records...")
             
             # If we received fewer records than the chunk size, we've reached the end of the data.
             if len(data) < chunk_size:
@@ -154,7 +154,7 @@ else:
 
 # --- FILTERS ---
 min_val = st.sidebar.number_input("Valuation Floor ($)", min_value=0, value=0, step=10000)
-all_tiers = ["Commercial", "Residential", "Commodity", "Unknown"]
+all_tiers = ["Commercial", "Residential", "Commodity", "Strategic", "Ambiguous", "Unknown"]
 selected_tiers = st.sidebar.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
 
 if not selected_city:

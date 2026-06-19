@@ -12,6 +12,11 @@ Key Logic:
 import requests
 from service_models import PermitRecord, ComplexityTier
 
+
+def _parse_date(d):
+    return d.split("T")[0] if d else None
+
+
 def get_austin_data(app_token, cutoff_date):
     """
     Fetches and normalizes building permit data from the City of Austin's Socrata API.
@@ -26,45 +31,52 @@ def get_austin_data(app_token, cutoff_date):
     print(f"🤠 Fetching Austin data since {cutoff_date}...")
     
     AUSTIN_API_URL = "https://data.austintexas.gov/resource/3syk-w9eu.json"
-    
-    # CRITICAL FIX: The Austin API's `applieddate` is often null or years in the past.
-    # Sorting by `issue_date` is essential to get recent permits.
-    params = {
-        "$where": f"issue_date >= '{cutoff_date}T00:00:00'",
-        "$limit": 5000,
-        "$order": "issue_date DESC",
-        "$$app_token": app_token
-    }
-    
-    try:
-        response = requests.get(AUSTIN_API_URL, params=params, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"❌ Austin API Error: {response.status_code}")
-            return []
-            
-        data = response.json()
-        if not data:
-            print("⚠️ No Austin data returned.")
-            return []
-            
-        records = []
-        for item in data:
-            # --- Data Normalization ---
-            # The following lines map the raw API response to the standardized PermitRecord model.
+    PAGE_SIZE = 1000
 
-            def parse_date(d):
-                return d.split("T")[0] if d else None
-            
-            applied = parse_date(item.get("applieddate"))
-            issued = parse_date(item.get("issue_date"))
-            
-            # The 'description' field is often empty; 'work_class' is a reliable fallback.
+    all_items = []
+    offset = 0
+
+    try:
+        while True:
+            # Sort by issue_date DESC — applieddate is often null or years stale.
+            params = {
+                "$where": f"issue_date >= '{cutoff_date}T00:00:00'",
+                "$limit": PAGE_SIZE,
+                "$offset": offset,
+                "$order": "issue_date DESC",
+                "$$app_token": app_token
+            }
+            response = requests.get(AUSTIN_API_URL, params=params, timeout=30)
+
+            if response.status_code != 200:
+                print(f"Austin API Error on page {offset // PAGE_SIZE + 1}: {response.status_code}")
+                break
+
+            page = response.json()
+            if not page:
+                break
+
+            all_items.extend(page)
+
+            if len(page) < PAGE_SIZE:
+                break
+
+            offset += PAGE_SIZE
+            print(f"   Austin: fetched {len(all_items)} records so far...")
+
+        if not all_items:
+            print("No Austin data returned.")
+            return []
+
+        records = []
+        for item in all_items:
+            applied = _parse_date(item.get("applieddate"))
+            issued = _parse_date(item.get("issue_date"))
             desc = item.get("description") or item.get("work_class") or "Unspecified"
-            
-            # Ensure valuation is a float, defaulting to 0.0 if missing or invalid.
-            try: val = float(item.get("valuation", 0.0) or 0.0)
-            except: val = 0.0
+            try:
+                val = float(item.get("valuation", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                val = 0.0
 
             r = PermitRecord(
                 city="Austin",
@@ -77,10 +89,10 @@ def get_austin_data(app_token, cutoff_date):
                 status=item.get("status_current", "Issued")
             )
             records.append(r)
-            
-        print(f"✅ Austin: Retrieved {len(records)} records.")
+
+        print(f"Austin: Retrieved {len(records)} records.")
         return records
 
     except Exception as e:
-        print(f"❌ Austin Integration Error: {e}")
+        print(f"Austin Integration Error: {e}")
         return []

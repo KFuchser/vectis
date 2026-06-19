@@ -2,11 +2,13 @@
 Ingestion spoke for New York, NY (Socrata API) using sodapy.
 
 This module handles fetching and normalizing building permit data from the City of New York.
-Endpoint: https://data.cityofnewyork.us/api/views/ipu4-2q9a/rows.json (SODA 3.0 compatible)
+Endpoint: data.cityofnewyork.us — dataset rbx6-tga4 (DOB NOW active permits)
 
 Key Logic:
-- Uses sodapy library for robust Socrata API interaction.
-- Maps Socrata API fields to `PermitRecord` fields.
+- Uses sodapy for Socrata API interaction.
+- 24-month hard lookback limit to prevent massive historical pulls.
+- Paginated at 1,000 records/page via offset loop.
+- Maps `approved_date` to `applied_date` (closest available approximation).
 """
 from sodapy import Socrata
 from service_models import PermitRecord, ComplexityTier
@@ -23,44 +25,57 @@ def get_new_york_data(app_token, cutoff_date):
     Returns:
         A list of `PermitRecord` objects, or an empty list if an error occurs.
     """
-    # --- HARD LIMIT: 24 MONTHS ---
-    # Ensure the cutoff date is no further back than 24 months from today.
-    max_history = (datetime.now() - timedelta(days=24*30)).strftime("%Y-%m-%d")
+    # Hard limit: no further back than 24 months to avoid massive historical pulls.
+    max_history = (datetime.now() - timedelta(days=730)).strftime("%Y-%m-%d")
     final_cutoff = max(cutoff_date, max_history)
-    
-    print(f"🗽 Fetching New York data since {final_cutoff} (requested: {cutoff_date}) using sodapy...")
-    
-    # Socrata API endpoint details for SODA 3.0 /views API
-    # Domain: data.cityofnewyork.us
-    # Dataset ID: rbx6-tga4 (Newer DOB NOW data)
+
+    print(f"New York: Fetching permits since {final_cutoff} (requested: {cutoff_date})...")
+
+    # Dataset ID: rbx6-tga4 (DOB NOW active permits)
     client = Socrata("data.cityofnewyork.us", app_token=app_token)
-    
-    query_params = {
-        "where": f"issued_date >= '{final_cutoff}' AND approved_date >= '{final_cutoff}'",
-        "limit": 5000,
-        "order": "issued_date DESC",
-    }
-    
+    where_clause = f"issued_date >= '{final_cutoff}' AND approved_date >= '{final_cutoff}'"
+    PAGE_SIZE = 1000
+
+    def parse_date(d):
+        return d.split("T")[0] if d else None
+
+    all_items = []
+    offset = 0
+
     try:
-        data = client.get("rbx6-tga4", **query_params)
-        
-        if not data:
-            print("⚠️ No New York data returned.")
+        while True:
+            page = client.get(
+                "rbx6-tga4",
+                where=where_clause,
+                limit=PAGE_SIZE,
+                offset=offset,
+                order="issued_date DESC",
+            )
+
+            if not page:
+                break
+
+            all_items.extend(page)
+
+            if len(page) < PAGE_SIZE:
+                break
+
+            offset += PAGE_SIZE
+            print(f"   New York: fetched {len(all_items)} records so far...")
+
+        if not all_items:
+            print("No New York data returned.")
             return []
-            
+
         records = []
-        for item in data:
-            # --- Data Normalization ---
-            def parse_date(d):
-                return d.split("T")[0] if d else None
-            
-            applied = parse_date(item.get("approved_date")) # Using approved_date as closest to applied_date
+        for item in all_items:
+            applied = parse_date(item.get("approved_date"))
             issued = parse_date(item.get("issued_date"))
-            
             desc = item.get("job_description") or "Unspecified"
-            
-            try: val = float(item.get("estimated_job_costs", 0.0) or 0.0) 
-            except: val = 0.0
+            try:
+                val = float(item.get("estimated_job_costs", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                val = 0.0
 
             r = PermitRecord(
                 city="New York",
@@ -73,12 +88,12 @@ def get_new_york_data(app_token, cutoff_date):
                 status=item.get("permit_status", "Issued")
             )
             records.append(r)
-            
-        print(f"✅ New York: Retrieved {len(records)} records.")
+
+        print(f"New York: Retrieved {len(records)} records.")
         return records
 
     except Exception as e:
-        print(f"❌ New York Integration Error: {e}")
+        print(f"New York Integration Error: {e}")
         return []
 
 if __name__ == "__main__":

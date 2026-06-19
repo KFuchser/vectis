@@ -42,6 +42,10 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GEMINI_KEY = os.getenv("GOOGLE_API_KEY")
 SOCRATA_TOKEN = os.getenv("SOCRATA_APP_TOKEN", None)
 
+_missing = [k for k, v in {"SUPABASE_URL": SUPABASE_URL, "SUPABASE_KEY": SUPABASE_KEY, "GOOGLE_API_KEY": GEMINI_KEY}.items() if not v]
+if _missing:
+    raise EnvironmentError(f"Missing required environment variables: {', '.join(_missing)}. Check your .env file.")
+
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 ai_client = genai.Client(api_key=GEMINI_KEY)
 
@@ -63,6 +67,24 @@ def extract_json_from_text(text: str):
         return json.loads(text)
     except Exception:
         return []
+
+
+def _map_project_category(category_str: str, tier: ComplexityTier) -> ProjectCategory:
+    """Maps the AI's free-form category string to a ProjectCategory enum value."""
+    cat = (category_str or "").upper()
+    if any(k in cat for k in ("TENANT", " TI", "FINISH OUT", "INTERIOR IMPROVEMENT")):
+        return ProjectCategory.COMMERCIAL_TI
+    if "TRADE" in cat:
+        return ProjectCategory.TRADE_ONLY
+    if tier == ComplexityTier.RESIDENTIAL:
+        if any(k in cat for k in ("NEW", "CONSTRUCTION", "BUILD")):
+            return ProjectCategory.RESIDENTIAL_NEW
+        return ProjectCategory.RESIDENTIAL_ALTERATION
+    if tier == ComplexityTier.COMMERCIAL:
+        if any(k in cat for k in ("NEW", "CONSTRUCTION", "BUILD")):
+            return ProjectCategory.COMMERCIAL_NEW
+        return ProjectCategory.COMMERCIAL_TI
+    return ProjectCategory.UNKNOWN
 
 
 def process_and_classify_permits(records: List[PermitRecord]) -> List[PermitRecord]:
@@ -156,7 +178,9 @@ def process_and_classify_permits(records: List[PermitRecord]) -> List[PermitReco
                             target.complexity_tier = ComplexityTier.COMMODITY
                         else:
                             target.complexity_tier = ComplexityTier.UNKNOWN
-                        target.project_category = ProjectCategory.UNKNOWN
+                        target.project_category = _map_project_category(
+                            item.get("category", ""), target.complexity_tier
+                        )
                         target.ai_rationale = item.get("rationale", "AI Classified")
                         classified_ids.add(record_idx)
                         ai_success_count += 1
@@ -220,13 +244,19 @@ def main():
     city_counts: Dict[str, int] = {}
 
     def ingest(label: str, fn, *args):
-        try:
-            records = fn(*args)
-            all_data.extend(records)
-            city_counts[label] = len(records)
-        except Exception as e:
-            print(f"⚠️ {label} Failed: {e}")
-            city_counts[label] = 0
+        for attempt in range(3):
+            try:
+                records = fn(*args)
+                all_data.extend(records)
+                city_counts[label] = len(records)
+                return
+            except Exception as e:
+                if attempt < 2:
+                    print(f"⚠️ {label} attempt {attempt + 1} failed: {e}. Retrying in 5s...")
+                    time.sleep(5)
+                else:
+                    print(f"⚠️ {label} failed after 3 attempts: {e}")
+                    city_counts[label] = 0
 
     ingest("Austin",        get_austin_data,        SOCRATA_TOKEN, cutoff)
     ingest("San Antonio",   get_san_antonio_data,   cutoff)
@@ -242,7 +272,18 @@ def main():
         print(f"   {status} {city}: {count} records")
     print(f"   Total: {len(all_data)} records\n")
 
-    print(f"⚙️  Classifying {len(all_data)} records...")
+    # Time-travel guard: drop records where issued_date precedes applied_date.
+    # Both dates must be present to trigger; missing either passes through.
+    pre_guard = len(all_data)
+    all_data = [
+        r for r in all_data
+        if not (r.issued_date and r.applied_date and r.issued_date < r.applied_date)
+    ]
+    dropped = pre_guard - len(all_data)
+    if dropped:
+        print(f"Time-travel guard: dropped {dropped} record(s) where issued_date < applied_date.\n")
+
+    print(f"Classifying {len(all_data)} records...")
     final_records = process_and_classify_permits(all_data)
 
     unique_batch: Dict[str, dict] = {}
