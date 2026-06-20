@@ -8,7 +8,8 @@ It provides:
 - Filtering by city, valuation, and complexity tier.
 
 Key Technical Features:
-- Pagination Loop: Overcomes Supabase's 1000-row default limit to fetch the full dataset.
+- Pagination Loop: Overcomes Supabase's 1000-row default limit; no server-side ORDER BY
+  to avoid Postgres statement timeouts (57014) at large offsets. Sort done once in pandas.
 - Time Guard: Filters out future dates (common in Fort Worth data).
 - Velocity Calculation: Computes days between Application and Issuance.
 """
@@ -44,77 +45,61 @@ st.markdown("""
 
 @st.cache_data(ttl=600)
 def load_data():
-    """
-    Loads permit data from the Supabase database, processes it, and caches the result.
-
-    This function performs several key operations:
-    1.  Fetches all records from the 'permits' table using a pagination loop to overcome the 1000-row limit.
-    2.  Converts date columns to datetime objects.
-    3.  Filters out future-dated permits (a data quality issue specific to Fort Worth).
-    4.  Calculates the 'velocity' (lead time) in days between application and issuance.
-
-    Returns:
-        A pandas DataFrame containing the processed permit data, or an empty DataFrame if an error occurs.
-    """
     try:
         url = st.secrets["SUPABASE_URL"]
         key = st.secrets["SUPABASE_KEY"]
         supabase: Client = create_client(url, key)
-        
-        # --- PAGINATION LOOP ---
-        # Supabase has a hard limit of 1000 rows per request. This loop fetches all records
-        # by making repeated calls and incrementing the offset.
-        all_records = []
-        chunk_size = 1000 
-        offset = 0
-        
-        # Placeholder to show loading progress
-        progress_text = "Fetching complete dataset..."
-        my_bar = st.progress(0, text=progress_text)
 
-        while True:
-            # Fetch a chunk of 1000
-            response = supabase.table('permits')\
-                .select("*")\
-                .order('issued_date', desc=True)\
-                .range(offset, offset + chunk_size - 1)\
+        all_records = []
+        chunk_size = 1000
+        offset = 0
+        MAX_PAGES = 200  # 200k record ceiling — raises a warning instead of silently timing out
+
+        my_bar = st.progress(0, text="Fetching complete dataset...")
+
+        for _ in range(MAX_PAGES):
+            # No .order() here — sorting 63k+ rows on every paginated call triggers Postgres
+            # statement timeout (57014). We sort once in pandas after the full load instead.
+            response = supabase.table('permits') \
+                .select("*") \
+                .range(offset, offset + chunk_size - 1) \
                 .execute()
-            
+
             data = response.data
+            if not data:
+                break
             all_records.extend(data)
-            
-            # Progress is relative — total unknown until fetch completes; bar clears after loop
-            my_bar.progress(min(len(all_records) / (len(all_records) + chunk_size), 0.95), text=f"Fetched {len(all_records)} records...")
-            
-            # If we received fewer records than the chunk size, we've reached the end of the data.
+            my_bar.progress(
+                min(len(all_records) / (len(all_records) + chunk_size), 0.95),
+                text=f"Fetched {len(all_records)} records..."
+            )
             if len(data) < chunk_size:
                 break
-                
             offset += chunk_size
-            time.sleep(0.1) # Be a good citizen and don't hammer the API.
+            time.sleep(0.1)
+        else:
+            st.warning(f"Hit pagination cap at {len(all_records)} records — data may be incomplete.")
 
-        my_bar.empty() # Clear progress bar
-            
+        my_bar.empty()
+
         df = pd.DataFrame(all_records)
-        
+
         if not df.empty:
             df['issue_date'] = pd.to_datetime(df['issued_date'], errors='coerce')
             df['applied_date'] = pd.to_datetime(df['applied_date'], errors='coerce')
-            
-            # --- Data Processing ---
 
-            # Timezone information is not used in this dashboard and can cause issues with date comparisons.
             if df['issue_date'].dt.tz is not None:
                 df['issue_date'] = df['issue_date'].dt.tz_localize(None)
-            
-            # CRITICAL: The Fort Worth API often includes permits with future expiration dates in the
-            # `issued_date` field. This "Time Guard" filters them out to prevent chart distortion.
+
+            # Fort Worth Time Guard: filter future-dated expiration records.
             now = pd.Timestamp.now() + pd.Timedelta(days=1)
             df = df[df['issue_date'] <= now]
 
-            # Calculate the "velocity" or "lead time" of a permit in days.
             df['velocity'] = (df['issue_date'] - df['applied_date']).dt.days
-            
+
+            # Single sort here instead of per-page sort in Supabase.
+            df = df.sort_values('issue_date', ascending=False, ignore_index=True)
+
         return df
     except Exception as e:
         st.error(f"Data Load Error: {e}")
