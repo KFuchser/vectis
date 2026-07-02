@@ -8,8 +8,12 @@ It provides:
 - Filtering by city, valuation, and complexity tier.
 
 Key Technical Features:
+- Server-Side Filtering: Valuation, complexity tier, and city filters are pushed
+  into the Supabase query itself, so only matching rows are ever transferred.
 - Pagination Loop: Overcomes Supabase's 1000-row default limit; no server-side ORDER BY
   to avoid Postgres statement timeouts (57014) at large offsets. Sort done once in pandas.
+  Loops until a page returns fewer rows than requested (true EOF) — no artificial cap
+  on total records, only a generous safety ceiling to catch a runaway/misbehaving query.
 - Time Guard: Filters out future dates (common in Fort Worth data).
 - Velocity Calculation: Computes days between Application and Issuance.
 """
@@ -21,6 +25,10 @@ import time
 from urllib.parse import quote
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
+
+CHUNK_SIZE = 1000
+SAFETY_CEILING_PAGES = 5000  # ~5M rows — a genuine anomaly, not a normal ceiling
+
 
 def get_city_from_query_params():
     """Checks URL query parameters for a 'city' and returns it if found."""
@@ -43,43 +51,98 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+
+def _get_supabase() -> Client:
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+
+def _paginate(build_query, on_batch=None):
+    """
+    Runs a Supabase query to completion via range() pagination.
+
+    `build_query` is a zero-arg callable returning a fresh, unranged query
+    builder — a fresh builder is required each page (matches Supabase's
+    execute-once query object semantics).
+
+    Loops until a page returns fewer rows than CHUNK_SIZE (true EOF), so
+    results can never be silently truncated by a fixed page count. The
+    safety ceiling only guards against a runaway loop from a misbehaving
+    API, not against normal data growth.
+    """
+    all_records = []
+    offset = 0
+
+    for _ in range(SAFETY_CEILING_PAGES):
+        response = build_query().range(offset, offset + CHUNK_SIZE - 1).execute()
+        data = response.data
+        if not data:
+            break
+        all_records.extend(data)
+        if on_batch:
+            on_batch(len(all_records))
+        if len(data) < CHUNK_SIZE:
+            break
+        offset += CHUNK_SIZE
+        time.sleep(0.1)
+    else:
+        st.error(
+            f"Aborted after {SAFETY_CEILING_PAGES * CHUNK_SIZE:,} records — "
+            "this exceeds all expected data volume and likely indicates an API/query bug."
+        )
+
+    return all_records
+
+
 @st.cache_data(ttl=600)
-def load_data():
+def load_city_summary():
+    """
+    Independent, unfiltered per-city record counts — used to populate the
+    Jurisdictions filter and the Database Content Verification panel.
+    Pulls only the 'city' column, so it stays cheap even as the table grows.
+    """
     try:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
-        supabase: Client = create_client(url, key)
+        supabase = _get_supabase()
+        records = _paginate(lambda: supabase.table('permits').select("city"))
+        if not records:
+            return pd.Series(dtype='int64')
+        return pd.DataFrame(records)['city'].value_counts()
+    except Exception as e:
+        st.error(f"City Summary Load Error: {e}")
+        return pd.Series(dtype='int64')
 
-        all_records = []
-        chunk_size = 1000
-        offset = 0
-        MAX_PAGES = 200  # 200k record ceiling — raises a warning instead of silently timing out
 
-        my_bar = st.progress(0, text="Fetching complete dataset...")
+@st.cache_data(ttl=600)
+def load_data(min_val: int, selected_tiers: tuple, selected_cities: tuple):
+    """
+    Fetches permits matching the given filters directly from Supabase —
+    valuation, complexity tier, and city filters are applied server-side
+    so only matching rows are ever transferred.
+    """
+    if not selected_tiers or not selected_cities:
+        return pd.DataFrame()
 
-        for _ in range(MAX_PAGES):
-            # No .order() here — sorting 63k+ rows on every paginated call triggers Postgres
-            # statement timeout (57014). We sort once in pandas after the full load instead.
-            response = supabase.table('permits') \
+    try:
+        supabase = _get_supabase()
+
+        def build_query():
+            # No .order() here — sorting large result sets on every paginated call
+            # triggers Postgres statement timeout (57014). We sort once in pandas
+            # after the full load instead.
+            return supabase.table('permits') \
                 .select("*") \
-                .range(offset, offset + chunk_size - 1) \
-                .execute()
+                .gte('valuation', min_val) \
+                .in_('complexity_tier', list(selected_tiers)) \
+                .in_('city', list(selected_cities))
 
-            data = response.data
-            if not data:
-                break
-            all_records.extend(data)
-            my_bar.progress(
-                min(len(all_records) / (len(all_records) + chunk_size), 0.95),
-                text=f"Fetched {len(all_records)} records..."
+        my_bar = st.progress(0, text="Fetching filtered dataset...")
+        all_records = _paginate(
+            build_query,
+            on_batch=lambda n: my_bar.progress(
+                min(n / (n + CHUNK_SIZE), 0.95), text=f"Fetched {n} records..."
             )
-            if len(data) < chunk_size:
-                break
-            offset += chunk_size
-            time.sleep(0.1)
-        else:
-            st.warning(f"Hit pagination cap at {len(all_records)} records — data may be incomplete.")
-
+        )
         my_bar.empty()
 
         df = pd.DataFrame(all_records)
@@ -110,31 +173,25 @@ if st.sidebar.button("🔄 Force Refresh"):
     st.cache_data.clear()
     st.rerun()
 
-df_raw = load_data()
+city_summary = load_city_summary()
 
 selected_city = get_city_from_query_params()
+if selected_city and selected_city not in city_summary.index:
+    st.warning(f"'{selected_city}' is not a valid city. Showing national view.")
+    selected_city = None
 
 if selected_city:
-    if not df_raw.empty and selected_city in df_raw['city'].unique():
-        df_view = df_raw[df_raw['city'] == selected_city].copy()
-        st.title(f"🏛️ {selected_city} Regulatory Friction Index")
-    else:
-        st.warning(f"'{selected_city}' is not a valid city. Showing national view.")
-        selected_city = None
-        df_view = df_raw.copy()
-        st.title("🏛️ National Regulatory Friction Index")
+    st.title(f"🏛️ {selected_city} Regulatory Friction Index")
 else:
-    df_view = df_raw.copy()
     st.title("🏛️ National Regulatory Friction Index")
-    if not df_raw.empty:
+    if not city_summary.empty:
         with st.expander("🔎 Database Content Verification (Click to Expand)", expanded=True):
-            counts = df_raw['city'].value_counts().reset_index()
+            counts = city_summary.reset_index()
             counts.columns = ['City', 'Record Count']
             st.dataframe(counts, use_container_width=True, hide_index=True)
 
         with st.expander("🏙️ City-Specific Dashboards (Click to Expand)", expanded=False):
-            all_cities_for_links = sorted(list(df_raw['city'].unique()))
-            for city_link in all_cities_for_links:
+            for city_link in sorted(city_summary.index):
                 st.markdown(f"#### [{city_link} Dashboard](/?city={quote(city_link)})")
 
 # --- FILTERS ---
@@ -143,19 +200,12 @@ all_tiers = ["Commercial", "Residential", "Commodity", "Strategic", "Ambiguous",
 selected_tiers = st.sidebar.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
 
 if not selected_city:
-    cities = sorted(list(df_view['city'].unique())) if not df_view.empty else []
+    cities = sorted(city_summary.index) if not city_summary.empty else []
     selected_cities_from_filter = st.sidebar.multiselect("Jurisdictions", cities, default=cities)
 else:
     selected_cities_from_filter = [selected_city]
 
-if not df_view.empty:
-    df = df_view[
-        (df_view['valuation'] >= min_val) &
-        (df_view['complexity_tier'].isin(selected_tiers)) &
-        (df_view['city'].isin(selected_cities_from_filter))
-    ].copy()
-else:
-    df = pd.DataFrame()
+df = load_data(min_val, tuple(selected_tiers), tuple(selected_cities_from_filter))
 
 if df.empty:
     st.warning("No records found. Check filters or database connection.")
@@ -193,7 +243,7 @@ with col_vel:
     st.subheader("🐢 Weekly Velocity (Speed)")
     chart_df = df.dropna(subset=['issue_date', 'velocity'])
     chart_df = chart_df[chart_df['velocity'] >= 0]
-    
+
     if not chart_df.empty:
         chart_df['week'] = chart_df['issue_date'].dt.to_period('W').apply(lambda r: r.start_time)
         line_vel = alt.Chart(chart_df).mark_line(point=True).encode(
