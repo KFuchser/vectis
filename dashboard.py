@@ -8,8 +8,14 @@ It provides:
 - Filtering by city, valuation, and complexity tier.
 
 Key Technical Features:
-- Server-Side Filtering: Valuation, complexity tier, and city filters are pushed
-  into the Supabase query itself, so only matching rows are ever transferred.
+- Server-Side Filtering: Issue-date window, valuation, complexity tier, and city
+  filters are pushed into the Supabase query itself, so only matching rows are
+  ever transferred.
+- Bounded Default Load: The date window defaults to the last DEFAULT_WINDOW_DAYS
+  days, so first paint never pulls the whole (500k+ row) table. Unbounded loads
+  exhausted Streamlit Community Cloud's ~1 GB RAM / boot window (container death).
+- Cheap City Summary: per-city count='exact', head=True queries instead of
+  paginating the whole city column.
 - Pagination Loop: Overcomes Supabase's 1000-row default limit; no server-side ORDER BY
   to avoid Postgres statement timeouts (57014) at large offsets. Sort done once in pandas.
   Loops until a page returns fewer rows than requested (true EOF) — no artificial cap
@@ -22,12 +28,27 @@ import pandas as pd
 import altair as alt
 from supabase import create_client, Client
 import time
+from datetime import date, timedelta
 from urllib.parse import quote
 
 st.set_page_config(layout="wide", page_title="Vectis Command Console")
 
 CHUNK_SIZE = 1000
 SAFETY_CEILING_PAGES = 5000  # ~5M rows — a genuine anomaly, not a normal ceiling
+DEFAULT_WINDOW_DAYS = 90  # default issued_date window; keeps first render bounded
+
+# Cities ingested by the pipeline (one ingest_*.py each). There is no cheap way to
+# get DISTINCT city from PostgREST without scanning the table, so this is a constant.
+# Add new cities here when a new ingestor is added.
+KNOWN_CITIES = [
+    "Austin", "San Antonio", "Fort Worth", "Los Angeles",
+    "Chicago", "New York", "San Francisco",
+]
+
+# Only the columns the dashboard actually uses (avoids pulling unused wide columns).
+DASHBOARD_COLUMNS = (
+    "city,complexity_tier,valuation,description,issued_date,applied_date"
+)
 
 
 def get_city_from_query_params():
@@ -100,38 +121,54 @@ def load_city_summary():
     """
     Independent, unfiltered per-city record counts — used to populate the
     Jurisdictions filter and the Database Content Verification panel.
-    Pulls only the 'city' column, so it stays cheap even as the table grows.
+    Issues one cheap count='exact', head=True query per known city (no rows are
+    transferred), instead of paginating the whole table's city column.
     """
     try:
         supabase = _get_supabase()
-        records = _paginate(lambda: supabase.table('permits').select("city"))
-        if not records:
+        counts = {}
+        for city in KNOWN_CITIES:
+            resp = supabase.table('permits') \
+                .select("city", count='exact', head=True) \
+                .eq('city', city) \
+                .execute()
+            if resp.count:
+                counts[city] = int(resp.count)
+        if not counts:
             return pd.Series(dtype='int64')
-        return pd.DataFrame(records)['city'].value_counts()
+        return pd.Series(counts, dtype='int64').sort_values(ascending=False)
     except Exception as e:
         st.error(f"City Summary Load Error: {e}")
         return pd.Series(dtype='int64')
 
 
 @st.cache_data(ttl=600)
-def load_data(min_val: int, selected_tiers: tuple, selected_cities: tuple):
+def load_data(min_val: int, selected_tiers: tuple, selected_cities: tuple,
+              start_date: str, end_date: str):
     """
     Fetches permits matching the given filters directly from Supabase —
-    valuation, complexity tier, and city filters are applied server-side
-    so only matching rows are ever transferred.
+    issue-date window, valuation, complexity tier, and city filters are applied
+    server-side so only matching rows are ever transferred.
+
+    start_date / end_date are inclusive ISO 'YYYY-MM-DD' strings. issued_date is
+    ISO text, so lexical comparison is chronological. The query uses
+    `< end_date + 1 day` so timestamp-suffixed values on end_date still match.
     """
     if not selected_tiers or not selected_cities:
         return pd.DataFrame()
 
     try:
         supabase = _get_supabase()
+        end_exclusive = (date.fromisoformat(end_date) + timedelta(days=1)).isoformat()
 
         def build_query():
             # No .order() here — sorting large result sets on every paginated call
             # triggers Postgres statement timeout (57014). We sort once in pandas
             # after the full load instead.
             return supabase.table('permits') \
-                .select("*") \
+                .select(DASHBOARD_COLUMNS) \
+                .gte('issued_date', start_date) \
+                .lt('issued_date', end_exclusive) \
                 .gte('valuation', min_val) \
                 .in_('complexity_tier', list(selected_tiers)) \
                 .in_('city', list(selected_cities))
@@ -199,17 +236,49 @@ min_val = st.sidebar.number_input("Valuation Floor ($)", min_value=0, value=0, s
 all_tiers = ["Commercial", "Residential", "Commodity", "Strategic", "Ambiguous", "Unknown"]
 selected_tiers = st.sidebar.multiselect("Complexity Tiers", all_tiers, default=all_tiers)
 
+# Recency window: defaults to the last DEFAULT_WINDOW_DAYS days so the first render
+# is bounded. Widen it in the sidebar for more history.
+today = date.today()
+date_range = st.sidebar.date_input(
+    "Issued Date Range",
+    value=(today - timedelta(days=DEFAULT_WINDOW_DAYS), today),
+    max_value=today,
+    help=f"Defaults to the last {DEFAULT_WINDOW_DAYS} days. Widen for more history "
+         "(larger windows load more rows and take longer).",
+)
+if isinstance(date_range, (tuple, list)):
+    if len(date_range) == 2:
+        start_date, end_date = date_range
+    elif len(date_range) == 1:
+        # Mid-selection (only start picked): treat as start through today.
+        start_date, end_date = date_range[0], today
+    else:
+        start_date, end_date = today - timedelta(days=DEFAULT_WINDOW_DAYS), today
+else:
+    start_date, end_date = date_range, today
+
 if not selected_city:
     cities = sorted(city_summary.index) if not city_summary.empty else []
     selected_cities_from_filter = st.sidebar.multiselect("Jurisdictions", cities, default=cities)
 else:
     selected_cities_from_filter = [selected_city]
 
-df = load_data(min_val, tuple(selected_tiers), tuple(selected_cities_from_filter))
+df = load_data(
+    min_val,
+    tuple(selected_tiers),
+    tuple(selected_cities_from_filter),
+    start_date.isoformat(),
+    end_date.isoformat(),
+)
 
 if df.empty:
-    st.warning("No records found. Check filters or database connection.")
+    st.warning("No records found. Check filters, date range, or database connection.")
     st.stop()
+
+st.caption(
+    f"Showing permits issued {start_date.isoformat()} to {end_date.isoformat()} "
+    "(adjust 'Issued Date Range' in the sidebar for more history)."
+)
 
 # --- METRICS ---
 real_projects = df[df['velocity'] >= 0]
