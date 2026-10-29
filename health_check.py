@@ -82,6 +82,8 @@ def check_pulse(supabase):
 
 def check_time_travel(supabase):
     """CHECK 2: Did any negative processing_days slip through? Existence check only."""
+    # NOTE: unindexed scan; real fix is a partial index (DDL, run separately in Supabase):
+    # CREATE INDEX ... ON permits(processing_days) WHERE processing_days < 0
     res = supabase.table('permits') \
         .select('id') \
         .lt('processing_days', 0) \
