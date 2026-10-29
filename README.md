@@ -38,8 +38,11 @@ The pipeline currently ingests data from the following cities:
      SUPABASE_KEY="your_supabase_key"
      GOOGLE_API_KEY="your_gemini_api_key"
      SOCRATA_APP_TOKEN="your_socrata_token"
+     GEMINI_MODEL="gemini-3.8-flash"   # optional; defaults to the value in gemini_config.py
      ```
    - `GOOGLE_API_KEY` and `SOCRATA_APP_TOKEN` are required. The orchestrator will raise `EnvironmentError` at startup if any of the first three are missing.
+   - `GEMINI_MODEL` is the single place the Gemini model id is configured (read by `gemini_config.py`, imported by the orchestrator, `classify_engine.py`, `ai_classifier.py`, `runback.py`, `agent_main.py`, `verify_gemini.py`). Google retires model ids periodically; when that happens, run `python check_models.py` to list current ids, then change `GEMINI_MODEL` (or `DEFAULT_GEMINI_MODEL` in `gemini_config.py`) -- no other code changes needed. For GitHub Actions, set it as a repository variable and pass it in the workflow `env:` if you want to override the default without a commit.
+   - If Gemini is unusable (model retired/404, bad key/403, billing depleted/402) or most AI batches fail, `ingest_velocity_50.py` and `classify_engine.py` print a `FATAL` banner and exit non-zero (the Actions run goes red) instead of silently writing `Unknown`/`Commodity`.
 
 ## Project Structure
 

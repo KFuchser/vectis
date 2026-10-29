@@ -8,8 +8,10 @@ Four-level strategy:
 - Level 1 (Keyword Turbo): Free keyword filter — classifies obvious Commodity permits instantly.
 - Level 2 (Pattern Grouping): Collapses duplicate descriptions so each unique pattern is only
   sent to the AI once, reducing API cost.
-- Level 3 (AI Processor): Sends batches of unique patterns to Gemini 2.0 Flash for nuanced
-  classification into 'Strategic', 'Commodity', or 'Ambiguous'.
+- Level 3 (AI Processor): Sends batches of unique patterns to Gemini (model set by
+  GEMINI_MODEL, see gemini_config.py) for nuanced classification into 'Strategic',
+  'Commodity', or 'Ambiguous'. A fundamentally broken model/key/billing (404/401/402/403) or
+  a majority of failed batches exits non-zero so the GitHub Actions run goes red.
 - Level 4 (Broadcast Updates): Applies AI results back to all DB records sharing each pattern
   via a single batched upsert per batch, scoped by (city, permit_id).
 
@@ -20,11 +22,14 @@ the orchestrator at ingest time will not be re-processed here.
 """
 import os
 import json
+import sys
 import time
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import google.genai as genai
 from google.genai import types
+
+from gemini_config import GEMINI_MODEL, AIClassificationError, is_fatal_ai_error, fatal_ai_banner
 
 # --- 1. CONFIGURATION ---
 load_dotenv()
@@ -34,6 +39,8 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
 BATCH_SIZE = 15     # Unique patterns to send to AI at once
 UPSERT_CHUNK = 200  # Max records per Supabase upsert call
+MAX_CONSECUTIVE_FAILED_BATCHES = 3  # Abort the AI pass after this many failed batches in a row
+MAX_FAIL_RATE = 0.5                 # Abort (exit non-zero) if more than this share of batches fail
 
 # Initialize Supabase
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -114,6 +121,11 @@ def run_keyword_turbo():
 def run_ai_processor():
     """
     Groups unique descriptions and sends to Gemini with Negative Constraints.
+
+    Raises:
+        AIClassificationError: Gemini is fundamentally broken (model 404 / key 401,403 /
+            billing 402), several batches in a row failed, or most batches failed overall.
+            A single transient batch error is logged, counted and skipped.
     """
     print("\n>> 🧠 LEVEL 2: Starting AI Pattern Processor...")
     
@@ -166,6 +178,11 @@ def run_ai_processor():
     print(f"   📉 Optimization: Collapsed {len(raw_permits)} rows into {len(unique_patterns)} unique patterns.")
 
     # 3. Process in Batches
+    total_batches = (len(unique_patterns) + BATCH_SIZE - 1) // BATCH_SIZE
+    failed_batches = 0
+    failed_patterns = 0
+    consecutive_failed = 0
+
     for i in range(0, len(unique_patterns), BATCH_SIZE):
         batch_keys = unique_patterns[i : i + BATCH_SIZE]
         
@@ -203,7 +220,7 @@ def run_ai_processor():
 
         try:
             response = ai_client.models.generate_content(
-                model="gemini-2.0-flash",
+                model=GEMINI_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(response_mime_type="application/json")
             )
@@ -232,11 +249,31 @@ def run_ai_processor():
                 except Exception as ue:
                     print(f"   !! Broadcast upsert chunk failed: {ue}")
 
+            consecutive_failed = 0
             time.sleep(2)
 
         except Exception as e:
-            print(f"   !! Batch Error: {e}")
+            if is_fatal_ai_error(e):
+                # Model retired / bad key / billing: every remaining batch would fail the
+                # same way. Stop and fail the run instead of swallowing it.
+                print(fatal_ai_banner("classify_engine AI processor", e))
+                raise AIClassificationError(f"Fatal Gemini error: {e}") from e
+            failed_batches += 1
+            failed_patterns += len(batch_keys)
+            consecutive_failed += 1
+            print(f"   !! Batch Error ({failed_batches} failed so far): {e}")
+            if consecutive_failed >= MAX_CONSECUTIVE_FAILED_BATCHES:
+                raise AIClassificationError(
+                    f"{consecutive_failed} consecutive AI batches failed; aborting.") from e
             time.sleep(5)
+
+    print(f"   AI pass complete: {total_batches - failed_batches}/{total_batches} batches ok, "
+          f"{failed_batches} failed ({failed_patterns} patterns left Unknown).")
+    if total_batches and failed_batches / total_batches > MAX_FAIL_RATE:
+        print(f"::error title=Gemini AI failure::{failed_batches}/{total_batches} classify_engine "
+              f"batches failed (model {GEMINI_MODEL})")
+        raise AIClassificationError(
+            f"{failed_batches}/{total_batches} AI batches failed (> {MAX_FAIL_RATE:.0%}).")
 
 
 # --- MAIN EXECUTION (SAFE MODE) ---
@@ -246,18 +283,25 @@ if __name__ == "__main__":
     # STEP 1: Always Run Keyword Turbo (Free & Safe)
     run_keyword_turbo()
     
-    # STEP 2: Circuit Breaker for AI
-    # This try/except block ensures the pipeline survives if Google returns 403/Restricted
+    # STEP 2: AI processor. Level 1 above already persisted its free results, so a hard AI
+    # failure here must NOT be swallowed: exit non-zero so the workflow run goes red.
+    ai_failed = False
     try:
         # Check if we have a key before even trying
         if ai_client:
-            print("\n>> Attempting to connect to Gemini...")
+            print(f"\n>> Attempting to connect to Gemini ({GEMINI_MODEL})...")
             run_ai_processor()
         else:
             print("\n>> 🧠 Skipping AI Processor (No Key Found).")
-            
-    except Exception as e:
-        print(f"   !! AI Module Skipped due to API restriction/Error: {e}")
-        print("   (The pipeline continued successfully without AI)")
 
-    print(">> Engine Cycle Complete.")
+    except AIClassificationError as e:
+        ai_failed = True
+        print(f"\n!! AI PROCESSOR FAILED: {e}")
+    except Exception as e:
+        ai_failed = True
+        print(f"\n!! AI PROCESSOR CRASHED (unexpected error): {e}")
+        print(f"::error title=classify_engine crashed::{str(e)[:300]}")
+
+    print(">> Engine Cycle Complete." if not ai_failed else ">> Engine Cycle FAILED.")
+    if ai_failed:
+        sys.exit(1)
