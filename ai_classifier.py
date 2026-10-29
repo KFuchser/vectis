@@ -13,7 +13,10 @@ import time
 import re
 from dotenv import load_dotenv
 from supabase import create_client, Client
-import google.generativeai as genai
+import google.genai as genai
+from google.genai import types
+
+from gemini_config import GEMINI_MODEL, is_fatal_ai_error, fatal_ai_banner
 
 # 1. Load Config
 load_dotenv()
@@ -25,11 +28,10 @@ if not GOOGLE_API_KEY:
     print("!! ERROR: GOOGLE_API_KEY is missing from .env")
     exit(1)
 
-genai.configure(api_key=GOOGLE_API_KEY)
+ai_client = genai.Client(api_key=GOOGLE_API_KEY)
 
-# CRITICAL FIX: Use the 'Lite' model which appears in your allowed list
-# This should have a fresh quota bucket separate from the main Flash model.
-MODEL_NAME = "gemini-2.0-flash-exp" 
+# Model id is centralized in gemini_config.py (override with the GEMINI_MODEL env var).
+MODEL_NAME = GEMINI_MODEL
 BATCH_SIZE = 15
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -83,13 +85,14 @@ def run_classification_job():
 
         # 3. Call Gemini
         try:
-            model = genai.GenerativeModel(
-                model_name=MODEL_NAME,
-                system_instruction=SYSTEM_INSTRUCTION,
-                generation_config={"response_mime_type": "application/json"}
+            response = ai_client.models.generate_content(
+                model=MODEL_NAME,
+                contents=f"Analyze this data:\n{payload_text}",
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    response_mime_type="application/json"
+                )
             )
-            
-            response = model.generate_content(f"Analyze this data:\n{payload_text}")
             clean_text = response.text.replace("```json", "").replace("```", "").strip()
             classified_data = json.loads(clean_text)
 
@@ -123,6 +126,10 @@ def run_classification_job():
             time.sleep(15) 
 
         except Exception as e:
+            if is_fatal_ai_error(e):
+                # Model/key/billing is broken; looping forever would just spin. Stop loudly.
+                print(fatal_ai_banner("ai_classifier", e))
+                raise SystemExit(1)
             error_str = str(e)
             if "429" in error_str or "Quota exceeded" in error_str:
                 print(f"   ⏳ Rate Limit Hit. Sleeping 60s...")

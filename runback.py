@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 from google import genai 
 from google.genai import types
 
+from gemini_config import GEMINI_MODEL, is_fatal_ai_error, fatal_ai_banner
+
 load_dotenv()
 
 # --- CONFIG ---
@@ -38,7 +40,7 @@ def batch_classify_backlog(records):
 
     try:
         response = ai_client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=GEMINI_MODEL,
             contents=batch_prompt,
             config=types.GenerateContentConfig(response_mime_type="application/json")
         )
@@ -65,6 +67,9 @@ def batch_classify_backlog(records):
             except: continue
         return updates
     except Exception as e:
+        if is_fatal_ai_error(e):
+            print(fatal_ai_banner("runback", e))
+            raise SystemExit(1)
         print(f"⚠️ AI Error: {e}")
         return []
 

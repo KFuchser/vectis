@@ -15,6 +15,7 @@ from supabase import create_client, Client
 
 # Import your models
 from service_models import PermitClassification
+from gemini_config import GEMINI_MODEL
 
 # 1. SETUP: Load API Key
 # If running locally, use os.getenv. If on Streamlit Cloud, use st.secrets
@@ -23,7 +24,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY") or st.secrets["GOOGLE_API_KEY"]
 # 2. INITIALIZE: The Intelligence Layer
 # We use temperature=0 for consistent, factual data extraction
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash", 
+    model=GEMINI_MODEL,
     temperature=0,
     google_api_key=GOOGLE_API_KEY
 )
