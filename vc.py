@@ -66,12 +66,15 @@ def audit_db():
         for _, r in df.iterrows():
             print(f"- {r['city']}: {r['min_issued']} to {r['max_issued']}")
 
-        # Check for San Antonio specifically
-        sa_count = int(df.loc[df["city"] == "San Antonio", "records"].fillna(0).iloc[0])
-        if sa_count == 0:
+        # Check for San Antonio specifically. A failed/timed-out query (records is NaN/None)
+        # is NOT the same as a successful query that returned 0 rows.
+        sa_records = df.loc[df["city"] == "San Antonio", "records"].iloc[0]
+        if pd.isna(sa_records):
+            print("\n⚠️ San Antonio: query failed (see error above), presence unknown.")
+        elif int(sa_records) == 0:
             print("\n⚠️ ALERT: San Antonio is MISSING from the database.")
         else:
-            print(f"\n✅ San Antonio is present ({sa_count} records).")
+            print(f"\n✅ San Antonio is present ({int(sa_records)} records).")
 
     except Exception as e:
         print(f"❌ Audit Error: {e}")
