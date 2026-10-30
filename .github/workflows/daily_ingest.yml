@@ -3,11 +3,31 @@ name: Daily Data Factory Pipeline
 on:
   schedule:
     - cron: "0 11 * * *" # Runs at 6:00 AM CST (11:00 UTC) daily
-  workflow_dispatch:      # Allows manual "Push to Start"
+  workflow_dispatch:      # Allows manual "Push to Start" (and manual wide backfills, see inputs)
+    inputs:
+      lookback_days:
+        description: "Lookback window in days. Scheduled runs always use 3. For a backfill use e.g. 90 (and see max_run_cost_usd / allow_cost_override)."
+        required: false
+        default: "3"
+      max_run_cost_usd:
+        description: "Per-run Gemini spend cap in USD (each script aborts, non-zero exit, if exceeded)."
+        required: false
+        default: "1.00"
+      allow_cost_override:
+        description: "Skip ONLY the pre-flight projected-cost check (the measured-cost cap still applies). Needed for a big first-pass backfill."
+        type: boolean
+        required: false
+        default: false
 
 jobs:
   ingest-and-classify:
     runs-on: ubuntu-latest
+    env:
+      # Scheduled runs have no inputs, so they fall through to the small defaults.
+      # Already-classified rows are skipped, so even a wide backfill is cheap on re-run.
+      INGEST_LOOKBACK_DAYS: ${{ github.event.inputs.lookback_days || '3' }}
+      MAX_RUN_COST_USD: ${{ github.event.inputs.max_run_cost_usd || '1.00' }}
+      ALLOW_COST_OVERRIDE: ${{ github.event.inputs.allow_cost_override == 'true' && '1' || '' }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -30,6 +50,8 @@ jobs:
           # ingest_velocity_50.py is the single orchestrator entry point.
           # It calls all city spokes internally — do NOT also run the individual
           # ingest_*.py scripts here, or every city will be fetched and billed twice.
+          # Lookback comes from INGEST_LOOKBACK_DAYS (3 on schedule; set via the
+          # workflow_dispatch "lookback_days" input for a backfill, e.g. 90).
           python ingest_velocity_50.py
 
       - name: Run AI Classification Engine

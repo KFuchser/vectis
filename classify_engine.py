@@ -27,9 +27,11 @@ import time
 from dotenv import load_dotenv
 from supabase import create_client, Client
 import google.genai as genai
-from google.genai import types
 
-from gemini_config import GEMINI_MODEL, AIClassificationError, is_fatal_ai_error, fatal_ai_banner
+from gemini_config import (
+    GEMINI_MODEL, AIClassificationError, is_fatal_ai_error, fatal_ai_banner,
+    classification_config, check_projected_cost, UsageTracker, MAX_RUN_COST_USD,
+)
 
 # --- 1. CONFIGURATION ---
 load_dotenv()
@@ -41,6 +43,14 @@ BATCH_SIZE = 15     # Unique patterns to send to AI at once
 UPSERT_CHUNK = 200  # Max records per Supabase upsert call
 MAX_CONSECUTIVE_FAILED_BATCHES = 3  # Abort the AI pass after this many failed batches in a row
 MAX_FAIL_RATE = 0.5                 # Abort (exit non-zero) if more than this share of batches fail
+
+# Rough per-call token sizes for the PRE-FLIGHT cost projection only (15 patterns x ~40 input
+# tokens + ~350-token prompt; ~15 x ~20 output tokens). Measured usage drives the in-loop cap.
+EST_INPUT_TOKENS_PER_CALL = 1200
+EST_OUTPUT_TOKENS_PER_CALL = 600
+
+# Per-run Gemini usage meter (reported at end of run, enforces MAX_RUN_COST_USD).
+usage = UsageTracker("classify_engine")
 
 # Initialize Supabase
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -179,11 +189,18 @@ def run_ai_processor():
 
     # 3. Process in Batches
     total_batches = (len(unique_patterns) + BATCH_SIZE - 1) // BATCH_SIZE
+
+    # PRE-FLIGHT cost guard: abort before spending anything if the projection is over the cap
+    # (ALLOW_COST_OVERRIDE=1 skips this check only; the measured-cost cap below always applies).
+    check_projected_cost("classify_engine AI processor", total_batches,
+                         EST_INPUT_TOKENS_PER_CALL, EST_OUTPUT_TOKENS_PER_CALL)
     failed_batches = 0
     failed_patterns = 0
     consecutive_failed = 0
 
     for i in range(0, len(unique_patterns), BATCH_SIZE):
+        usage.check_cap()  # in-loop guard on MEASURED spend so far (raises CostCapExceeded)
+
         batch_keys = unique_patterns[i : i + BATCH_SIZE]
         
         # Construct Payload for AI
@@ -222,8 +239,10 @@ def run_ai_processor():
             response = ai_client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=prompt,
-                config=types.GenerateContentConfig(response_mime_type="application/json")
+                config=classification_config(),  # JSON, thinking off, output capped
             )
+            # Meter immediately, before parsing, so even an unparseable response is counted.
+            usage.record(response, EST_INPUT_TOKENS_PER_CALL, EST_OUTPUT_TOKENS_PER_CALL)
             results = json.loads(response.text)
 
             # Collect all updates from this batch then upsert in one shot
@@ -267,6 +286,7 @@ def run_ai_processor():
                     f"{consecutive_failed} consecutive AI batches failed; aborting.") from e
             time.sleep(5)
 
+    usage.check_cap()  # catch an overshoot on the final call
     print(f"   AI pass complete: {total_batches - failed_batches}/{total_batches} batches ok, "
           f"{failed_batches} failed ({failed_patterns} patterns left Unknown).")
     if total_batches and failed_batches / total_batches > MAX_FAIL_RATE:
@@ -302,6 +322,7 @@ if __name__ == "__main__":
         print(f"\n!! AI PROCESSOR CRASHED (unexpected error): {e}")
         print(f"::error title=classify_engine crashed::{str(e)[:300]}")
 
+    print(usage.summary())
     print(">> Engine Cycle Complete." if not ai_failed else ">> Engine Cycle FAILED.")
     if ai_failed:
         sys.exit(1)

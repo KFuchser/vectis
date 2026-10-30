@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from google import genai 
 from google.genai import types
 
-from gemini_config import GEMINI_MODEL, is_fatal_ai_error, fatal_ai_banner
+from gemini_config import GEMINI_MODEL, is_fatal_ai_error, fatal_ai_banner, classification_config
 
 load_dotenv()
 
@@ -42,7 +42,7 @@ def batch_classify_backlog(records):
         response = ai_client.models.generate_content(
             model=GEMINI_MODEL,
             contents=batch_prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            config=classification_config()  # JSON, thinking off, output capped
         )
         
         raw_text = response.text.strip()
